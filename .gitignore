@@ -1,0 +1,7 @@
+**/.vs/
+**/.vscode/
+**/build/
+**/out/
+**/input/
+**/output/
+**/cmake-build-debug/
