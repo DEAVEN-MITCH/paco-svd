@@ -126,6 +126,7 @@ def convert_fortran_bin_to_row_major(filepath, shape, dtype=np.float32):
 
 
 if __name__ == "__main__":
+    
     # --- Configuration ---
     M, N = 1024, 1024 # Example dimensions
     args_file = "../args.txt"
@@ -138,8 +139,14 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(exe_dir, exist_ok=True)
 
-    # --- Generate args.txt ---
-    write_args_file(M, N, args_file)
+    # --- Read M, N from args.txt ---
+    try:
+        with open(args_file, 'r') as f:
+            M, N = map(int, f.readline().strip().split())
+        print(f"Read dimensions from {args_file}: M={M}, N={N}")
+    except Exception as e:
+        print(f"[ERROR] Failed to read M,N from {args_file}: {e}")
+        exit(1)
 
     # --- Compile Fortran ---
     exe_path = compile_fortran(fortran_source, output_dir=exe_dir)
