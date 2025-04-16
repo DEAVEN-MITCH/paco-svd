@@ -6,7 +6,10 @@ if [ "$1" = "r" ]; then
     # 创建构建目录
     mkdir -p ~/paco-svd/cmake-build-debug
 fi
-
+if [ "$1" = "v" ]; then
+    cmake --build ~/paco-svd/cmake-build-debug --target gen_data
+    exit 0
+fi
 # source ~/Ascend/ascend-toolkit/latest/bin/setenv.bash
 # echo $ASCEND_HOME_PATH
 cmake -DCMAKE_BUILD_TYPE=Debug -S ~/paco-svd -B ~/paco-svd/cmake-build-debug
