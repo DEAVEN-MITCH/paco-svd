@@ -8,8 +8,8 @@ message("ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 
 include(${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake/ascendc.cmake)
 
-add_custom_command(OUTPUT ../input/A_gm.bin ../input/L_gm.bin ../output/golden.bin COMMAND python3 ../scripts/gen_data.py DEPENDS ../args.txt ../scripts/gen_data.py)
-add_custom_target(gen_data DEPENDS ../input/A_gm.bin ../input/L_gm.bin ../output/golden.bin)
+add_custom_command(OUTPUT ../input/A_gm.bin ../output/B_golden.bin ../output/U_golden.bin ../output/Vt_golden.bin COMMAND python3 ../scripts/gen_data.py DEPENDS ../args.txt ../scripts/gen_data.py ../scripts/bidiag_gen.f90)
+add_custom_target(gen_data DEPENDS ../input/A_gm.bin ../output/B_golden.bin ../output/U_golden.bin ../output/Vt_golden.bin)
 
 ascendc_library(svd_kernels STATIC svd.cpp)
 # add_library(svd_tiling STATIC svd_custom_tiling.cpp)

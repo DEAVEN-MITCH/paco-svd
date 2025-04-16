@@ -1,36 +1,31 @@
-import numpy as np
-from scipy.linalg import bidiagonal
+import subprocess
+import os
 
-def gen_golden_data_bidiag():
-    # 读取参数
-    with open('../args.txt', 'r') as file:
-        args = file.read().split()
-        M = int(args[0])
-        N = int(args[1])
+def write_args_file(m, n, path="../args.txt"):
+    with open(path, "w") as f:
+        f.write(f"{m} {n}\n")
 
-    # 生成随机输入矩阵 A
-    A = np.random.uniform(-10, 10, [M, N]).astype(np.float32)
-    
-    # 计算双对角化分解
-    # scipy.linalg.bidiagonal 返回 (U, B, Vh)
-    U, B, Vt = bidiagonal(A, upper=True, overwrite_a=False)
-    
-    # 转换为 float32 类型
-    U = U.astype(np.float32)
-    B = B.astype(np.float32)
-    Vt = Vt.astype(np.float32)
-    
-    # 保存输入矩阵
-    A.tofile("../input/A_gm.bin")
-    
-    # 保存golden结果
-    U.tofile("../output/U_golden.bin")
-    B.tofile("../output/B_golden.bin")
-    Vt.tofile("../output/Vt_golden.bin")
-    
-    # 保存验证用的重构矩阵
-    A_reconstructed = U @ B @ Vt
-    A_reconstructed.tofile("../output/A_reconstructed_golden.bin")
+def compile_fortran(source_file, exe_name="bidiag_gen", output_dir="../test_bin"):
+    os.makedirs(output_dir, exist_ok=True)
+    exe_path = os.path.join(output_dir, exe_name)
+
+    compile_cmd = [
+        "gfortran",
+        source_file,
+        "-o", exe_path,
+        "-llapack", "-lblas"
+    ]
+    print("Compiling Fortran source...")
+    subprocess.run(compile_cmd, check=True)
+    return exe_path
+
+def run_executable(exe_path):
+    print("Running executable...")
+    subprocess.run([exe_path], check=True)
 
 if __name__ == "__main__":
-    gen_golden_data_bidiag()
+    # M, N = 5, 5  # 你可以根据需求设置
+    # write_args_file(M, N)
+
+    exe_path = compile_fortran("../scripts/bidiag_gen.f90")
+    run_executable(exe_path)
