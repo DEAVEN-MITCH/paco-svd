@@ -9,32 +9,40 @@ absolute_tol = 1e-5
 error_tol = 1e-3
 
 def load_matrix(filename, shape):
-    """加载二进制文件并重塑为指定形状的矩阵"""
+    """加载二进制文件并重塑为指定形状的矩阵 (assumes row-major/C order)"""
     try:
         # Fortran unformatted stream files might have record markers (4-byte integers)
         # at the beginning and end of each record (write statement).
         # We need to account for these when reading.
         # Assuming one record per file for simplicity here.
+
+        # Determine expected size
+        dtype=np.float32
+        expected_elements = np.prod(shape)
+        expected_bytes = expected_elements * np.dtype(dtype).itemsize
+
+        if not os.path.exists(filename):
+             raise FileNotFoundError(f"File not found: {filename}")
+
+        file_size = os.path.getsize(filename)
+        # Files should now be exactly the expected size (row-major)
+        if file_size != expected_bytes:
+            print(f"[WARNING] File size mismatch for {os.path.basename(filename)}. Expected {expected_bytes} bytes (row-major), but got {file_size} bytes.")
+
         with open(filename, 'rb') as f:
-            # Read the size of the record (optional, depends on Fortran compiler/settings)
-            # record_size = np.fromfile(f, dtype=np.int32, count=1)[0]
-            # print(f"Reading {filename}, expected record size: {record_size}")
-
-            # Calculate expected number of elements and bytes
-            expected_elements = np.prod(shape)
-            expected_bytes = expected_elements * np.dtype(np.float32).itemsize
-
             # Read the data
-            data = np.fromfile(f, dtype=np.float32, count=expected_elements)
-
-            # Read the end marker (optional)
-            # end_marker = np.fromfile(f, dtype=np.int32, count=1)
-            # if end_marker.size > 0 and end_marker[0] != record_size:
-            #     print(f"[Warning] End marker mismatch in {filename}. Expected {record_size}, got {end_marker[0]}")
+            data = np.fromfile(f, dtype=dtype, count=expected_elements)
 
             if data.size != expected_elements:
-                 raise ValueError(f"Error loading {filename}: Expected {expected_elements} elements ({expected_bytes} bytes), but got {data.size} elements ({data.nbytes} bytes)")
+                 raise ValueError(f"Error loading {filename}: Expected {expected_elements} elements ({expected_bytes} bytes), but got {data.size} elements ({data.nbytes} bytes). File size is {file_size} bytes.")
 
+             # Check for extra data
+            remaining_data = f.read()
+            if remaining_data:
+                 print(f"[WARNING] Unexpected extra {len(remaining_data)} bytes found at the end of {os.path.basename(filename)} after reading expected data.")
+
+
+        # Use default (row-major) order for reshape
         return data.reshape(shape)
     except FileNotFoundError:
         print(f"[ERROR] File not found: {filename}")
