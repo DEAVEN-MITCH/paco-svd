@@ -25,7 +25,6 @@ class another{
         AscendC::LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
 AscendC::PRINTF("in another!%d\n",x);
 }    private:
-    AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
     AscendC::GlobalTensor<half> xGm;
@@ -94,9 +93,6 @@ private:
     AscendC::GlobalTensor<half> zGm;
 };
 
-extern "C" __global__ __aicore__ void add_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z)
+extern "C" __global__ __aicore__ void svd_DC(GM_ADDR x)
 {
-    KernelAdd op;
-    op.Init(x, y, z);
-    op.Process();
 }

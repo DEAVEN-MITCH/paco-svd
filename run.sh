@@ -7,6 +7,8 @@ if [ "$1" = "r" ]; then
     mkdir -p ~/paco-svd/cmake-build-debug
 fi
 if [ "$1" = "v" ]; then
+ 
+    # cd scripts;
     cmake --build ~/paco-svd/cmake-build-debug --target gen_data
     exit 0
 fi
@@ -15,3 +17,4 @@ fi
 cmake -DCMAKE_BUILD_TYPE=Debug -S ~/paco-svd -B ~/paco-svd/cmake-build-debug
 cmake --build ~/paco-svd/cmake-build-debug --target svd_main -- -j 6
 cd ~/paco-svd/cmake-build-debug;./svd_main
+cd ~/paco-svd/scripts;python3 verify_result.py ../output ../output
