@@ -1,10 +1,10 @@
 #include "kernel_operator.h"
-constexpr int BUFFER_NUM = 2;
-constexpr int maxL1FloatSize = 1 << 19 - 2;
-constexpr int BlockSize = 32;
-constexpr int CONCURRENT_COL_CNT = BlockSize / sizeof(float);
-constexpr int SizePerOperation = 256;
-constexpr int BlockNumPerOperation = SizePerOperation / BlockSize;
+constexpr int32_t BUFFER_NUM = 1;
+constexpr int32_t maxL1FloatSize = 1 << 19 - 2;
+constexpr int32_t BlockSize = 32;
+constexpr int32_t CONCURRENT_COL_CNT = BlockSize / sizeof(float);
+constexpr int32_t SizePerOperation = 256;
+constexpr int32_t BlockNumPerOperation = SizePerOperation / BlockSize;
 constexpr uint64_t MASK_PATTERN = 0x0101010101010101ULL;
 class Kernel_Golub_Kahan_Bidiagonalization
 {
@@ -31,9 +31,9 @@ public:
         pipe.InitBuffer(e_, (N - 1) * sizeof(float));
         pipe.InitBuffer(tauq_, N * sizeof(float));
         pipe.InitBuffer(taup_, (N - 1) * sizeof(float));
-        pipe.InitBuffer(householder_vec, (M - 1) * BlockSize + SizePerOperation); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
+        pipe.InitBuffer(householder_vec, M * BlockSize + SizePerOperation); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
         // reduce sum need at most M
-        pipe.InitBuffer(worktmp, (M - 1) * BlockSize + SizePerOperation);
+        // pipe.InitBuffer(worktmp, M * BlockSize + SizePerOperation);
     }
     __aicore__ inline void Process()
     {
@@ -57,8 +57,6 @@ public:
             }
         }
 
-        // 构造双对角矩阵
-        ConstructBidiagonalMatrix();
         GetUVt();
     }
 
@@ -73,26 +71,27 @@ private:
             tauq_(i) = 0;
             return;
         }
-        AscendC::LocalTensor<float> col = colQueue.AllocTensor<float>();
-        const auto floor_i = i / CONCURRENT_COL_CNT, offset_i = i % CONCURRENT_COL_CNT;
+        // col= colQueue.AllocTensor<float>();
+        col=colBuf.Get<float>();
+        const auto floor_i =( i / CONCURRENT_COL_CNT)*CONCURRENT_COL_CNT, offset_i = i % CONCURRENT_COL_CNT;
         uint64_t mask[1] = {MASK_PATTERN << offset_i};
-        const uint8_t repeatTimes = (len - 1) / BlockNumPerOperation, tailSize = (len - 1) % BlockNumPerOperation;
-        const uint64_t tailOffset = repeatTimes * SizePerOperation + CONCURRENT_COL_CNT;
+        // const uint8_t repeatTimes = (len - 1) / BlockNumPerOperation, tailSize = (len - 1) % BlockNumPerOperation;
+        // const uint64_t tailOffset = repeatTimes * SizePerOperation + CONCURRENT_COL_CNT;
         // if tailSize > 0,only tailSize个 bit is 1
-        uint64_t tailMask[1] = {MASK_PATTERN << (CONCURRENT_COL_CNT * (BlockNumPerOperation - tailSize))};
+        // uint64_t tailMask[1] = {MASK_PATTERN << (CONCURRENT_COL_CNT * (BlockNumPerOperation - tailSize))};
         // 加载当前列,floor_i 列的block，加载M-i块
         AscendC::DataCopy(col, aGm[floor_i * n_], {len, 1, n_ / CONCURRENT_COL_CNT, 0});
-        colQueue.EnQue(col);
+        // colQueue.EnQue(col);
 
         // Vector Compute
-        col = colQueue.DeQue<float>();
-        AscendC::LocalTensor<float> outcol = householder_vec.Get<float>();
-        AscendC::LocalTensor<float> tmp = worktmp.Get<float>();
+        // col = colQueue.DeQue<float>();
+        // AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> outcol = outBuf.Get<float>();
+        AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
         // pad the tail operation blocks with 0
         AscendC::Duplicate(col[len * CONCURRENT_COL_CNT], .0f, BlockNumPerOperation * CONCURRENT_COL_CNT);
         // copy col to outcol
-        AscendC::Adds(outcol, col[CONCURRENT_COL_CNT], .0f, (len-1)*CONCURRENT_COL_CNT);
-
+        AscendC::Adds(outcol, col, .0f, len*CONCURRENT_COL_CNT);
         // get the first element of x 
         auto x1 = col(offset_i);
         // calculate the 2-norm of x except the first element
@@ -104,26 +103,47 @@ private:
         auto sigma=col(0);
         colQueue.FreeTensor(col);
         if(sigma==0){
+            //zero but x1
             if(x1>=0){
                 tauq_(i)=0;
+                //since beta is 0,no need to update other columns
+                //and nothing changes to the A matrix
             }else{
                 tauq_(i)=-2;
+                AscendC::Duplicate(tmp,.0f,len*CONCURRENT_COL_CNT);
+                //v1=1.0f
+                tmp(offset_i)=1.0f;
+                //in column i only changes the A[i][i] to its negative,which is -outcol(offset_i)
+                aGm[i*n_+i]=-outcol(offset_i);
+                //TODO check whether this practice is fine
+                // outQueue.FreeTensor(outcol);
             }
         }else{
             auto miu=std::sqrt(x1*x1+sigma);
             float v1;
-            if(x1<=0){//update v1,aka,outcol(offset_i)
+            if(x1<=0){//update v1,aka,tmp(offset_i)
                 v1=x1-miu;
             }else{
                 v1=-sigma/(x1+miu);
             }
             float v1sq=v1*v1;
             tauq_(i)=2*v1sq/(sigma+v1sq);
-            AscendC::Muls(outcol,outcol,1.0f/v1sq,mask,{1,1,BlockNumPerOperation,BlockNumPerOperation);
+            //calculate the essential householder vector
+            AscendC::Muls(outcol,outcol,1.0f/v1,mask,(len+BlockNumPerOperation-1)/BlockNumPerOperation,{1,1,BlockNumPerOperation,BlockNumPerOperation});
+            //construct the householder vector v,use adds 0 to copy conveniently
+            AscendC::Adds(tmp, outcol, .0f, len*CONCURRENT_COL_CNT);
+            //update final v1 and final A[i][i] using tmp and outcol
+            tmp(offset_i)=1.0f;
+            outcol(offset_i)=miu;//2-norm of x
+            // outQueue.Enque(outcol);
+
+
+            // outcol=outQueue.Deque<float>();
+            AscendC::DataCopy(aGm[floor_i * n_],outcol, {len, 1, 0, n_ / CONCURRENT_COL_CNT});
+
         }
 
-        //output len-1 essential householder vector
-        // the outcol is the essential householder vector
+
 
     }
     __aicore__ inline void ComputeRowHouseholder(int32_t i)
@@ -199,121 +219,8 @@ private:
         rowQueue.FreeTensor(row);
         outQueue.FreeTensor(result);
     }
-    __aicore__ inline void ConstructBidiagonalMatrix()
-    {
-        // 构造上双对角矩阵
-        for (int32_t i = 0; i < k_; i++)
-        {
-            // 设置对角元素
-            SetMatrixElement(i, i, d_[i]);
-
-            // 设置超对角元素
-            if (i < k_ - 1)
-            {
-                SetMatrixElement(i, i + 1, e_[i]);
-            }
-        }
-    }
-    // 辅助函数
-    __aicore__ inline float ComputeNorm(const AscendC::LocalTensor<float> &vec)
-    {
-        float sum = 0;
-        for (int32_t i = 0; i < vec.size(); i++)
-        {
-            sum += vec[i] * vec[i];
-        }
-        return AscendC::Sqrt(sum);
-    }
-    __aicore__ inline void ApplyHouseholderTransform(
-        const AscendC::LocalTensor<float> &input,
-        AscendC::LocalTensor<float> &output,
-        float tau)
-    {
-        // H = I - tau * v * v^T
-        // y = H * x = x - tau * v * (v^T * x)
-        float dot = 0;
-        for (int32_t i = 0; i < input.size(); i++)
-        {
-            dot += input[i] * input[i];
-        }
-
-        for (int32_t i = 0; i < input.size(); i++)
-        {
-            output[i] = input[i] - tau * input[i] * dot;
-        }
-    }
-
-    __aicore__ inline void StoreColumn(const AscendC::LocalTensor<float> &col, int32_t i, int32_t j)
-    {
-        // 将列向量存储回全局内存
-        for (int32_t k = i; k < m_; k++)
-        {
-            aGm[k * n_ + j] = col[k - i];
-        }
-    }
-
-    __aicore__ inline void LoadRow(AscendC::LocalTensor<float> &row, int32_t i, int32_t j)
-    {
-        // 从全局内存加载行向量
-        for (int32_t k = j; k < n_; k++)
-        {
-            row[k - j] = aGm[i * n_ + k];
-        }
-    }
-
-    __aicore__ inline void StoreRow(const AscendC::LocalTensor<float> &row, int32_t i, int32_t j)
-    {
-        // 将行向量存储回全局内存
-        for (int32_t k = j; k < n_; k++)
-        {
-            aGm[i * n_ + k] = row[k - j];
-        }
-    }
-
-    __aicore__ inline void SetMatrixElement(int32_t i, int32_t j, float value)
-    {
-        // 设置矩阵元素
-        aGm[i * n_ + j] = value;
-    }
      __aicore__ inline void GetUVt())
      {
-     }
-     __aicore__ inline void UpdateMatrixU(int32_t i)
-     {
-         // 更新U矩阵的第i列
-         for (int32_t k = 0; k < m_; k++)
-         {
-             for (int32_t j = 0; j < m_; j++)
-             {
-                 if (k == j)
-                 {
-                     uGm[k * m_ + j] = 1.0;
-                 }
-                 else
-                 {
-                     uGm[k * m_ + j] = 0.0;
-                 }
-             }
-         }
-     }
-
-     __aicore__ inline void UpdateMatrixVT(int32_t i)
-     {
-         // 更新VT矩阵的第i行
-         for (int32_t k = 0; k < n_; k++)
-         {
-             for (int32_t j = 0; j < n_; j++)
-             {
-                 if (k == j)
-                 {
-                     vtGm[k * n_ + j] = 1.0;
-                 }
-                 else
-                 {
-                     vtGm[k * n_ + j] = 0.0;
-                 }
-             }
-         }
      }
      __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt, int M, int N)
      {
@@ -330,10 +237,13 @@ private:
      }
 } private : int32_t m_, n_, k_;
 AscendC::TPipe pipe;
-AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> colQueue, rowQueue;
-AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, worktmp;
+// AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> colQueue, rowQueue;
+// AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+AscendC::TBuf<AscendC::TPosition::VECCALC> colBuf, rowBuf, outBuf;
+AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec;
+// AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
 AscendC::GlobalTensor<float> aGm, uGm, vtGm;
+AscendC::LocalTensor<float> col,row;
 }
 ;
 
