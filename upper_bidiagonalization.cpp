@@ -16,7 +16,7 @@ public:
         n_ = N;
         assert(M >= N && "in Init, we should have M>=N");
         k_ = std::min(M, N);
-        initUV(u, vt, M, N);
+        initUV(u, vt);
 
         // 设置全局内存缓冲区
         aGm.SetGlobalBuffer((__gm__ float *)a, M * N);
@@ -39,6 +39,13 @@ public:
         // pipe.InitBuffer(householder_vec, M * BlockSize + SizePerOperation); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
         // reduce sum need at most M
         // pipe.InitBuffer(worktmp, M * BlockSize + SizePerOperation);
+
+
+        houseVec = householder_vec.Get<float>();
+        scalartmp = scalarTmp.Get<float>();
+        vectmp = vecTmp.Get<float>();
+        taup = taup_.Get<float>();
+        tauq = tauq_.Get<float>();
     }
     __aicore__ inline void Process()
     {
@@ -160,7 +167,6 @@ private:
     {
         assert(i < n_ && "in ComputeColumnHouseholder, i should be less than n_");
         const int32_t len = m_ - i;
-        auto tauq = tauq_.Get<float>();
         if (len <= 1)
         {
             // a scalar vector, no need to calc,beta=0;
@@ -177,16 +183,15 @@ private:
         // Vector Compute
         col = inQueue.DeQue<float>();
         AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
         // copy col to outcol
         AscendC::Adds(outcol, col, .0f, len * CONCURRENT_COL_CNT);
         // get the first element of x
         auto x1 = col(0);
         // calculate the 2-norm of x except the first element
-        AscendC::Mul(tmp, col[CONCURRENT_COL_CNT], col[CONCURRENT_COL_CNT], (len - 1) * CONCURRENT_COL_CNT);
+        AscendC::Mul(houseVec, col[CONCURRENT_COL_CNT], col[CONCURRENT_COL_CNT], (len - 1) * CONCURRENT_COL_CNT);
         // use col as tmp worklocal space,col[0]=x(2:)Tx(2:)
         // since len >1,so col[CONCURRENT_COL_CNT] have more blocks than required worklocal
-        AscendC::ReduceSum(col, tmp, col[CONCURRENT_COL_CNT],(len-1)*CONCURRENT_COL_CNT));
+        AscendC::ReduceSum(col, houseVec, col[CONCURRENT_COL_CNT],(len-1)*CONCURRENT_COL_CNT));
         // update tauq_[i] as beta,
         auto sigma = col(0);
         inQueue.FreeTensor(col);
@@ -204,7 +209,7 @@ private:
             auto miu = std::sqrt(x1 * x1 + sigma);
             float v1;
             if (x1 <= 0)
-            { // update v1,aka,tmp(0)
+            { // update v1,aka,houseVec(0)
                 v1 = x1 - miu;
             }
             else
@@ -216,9 +221,9 @@ private:
             // calculate the essential householder vector
             AscendC::Muls(outcol, outcol, 1.0f / v1, len * CONCURRENT_COL_CNT);
             // construct the householder vector v,use adds 0 to copy conveniently
-            AscendC::Adds(tmp, outcol, .0f, len * CONCURRENT_COL_CNT);
+            AscendC::Adds(houseVec, outcol, .0f, len * CONCURRENT_COL_CNT);
             // update final v1 and final A[i][i] using tmp and outcol
-            tmp(0) = 1.0f;
+            houseVec(0) = 1.0f;
             outcol(0) = miu; // 2-norm of x
             outQueue.Enque(outcol);
 
@@ -246,14 +251,12 @@ private:
         // Vector Compute
         row = inQueue.DeQue<float>();
         AscendC::LocalTensor<float> outrow = outQueue.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
-        AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
         // copy row to outrow
         AscendC::Adds(outrow, row, 0.0f, ttl);
         auto x1 = row(0);
         row(0) = 0.0f; // to calculate x[2:len]Tx[2:len]
-        AscendC::Mul(tmp, row, row, ttl);
-        AscendC::ReduceSum(row, tmp, row[CONCURRENT_COL_CNT], ttl);
+        AscendC::Mul(houseVec, row, row, ttl);
+        AscendC::ReduceSum(row, houseVec, row[CONCURRENT_COL_CNT], ttl);
         auto sigma = row(0);
         inQueue.FreeTensor(row);
         if (sigma == 0)
@@ -276,8 +279,8 @@ private:
             float v1sq = v1 * v1;
             taup(i) = 2 * v1sq / (sigma + v1sq);
             AscendC::Muls(outrow, outrow, 1.0f / v1, ttl);
-            AscendC::Adds(tmp, outrow, 0.0f, ttl);
-            tmp(0) = 1.0f;
+            AscendC::Adds(houseVec, outrow, 0.0f, ttl);
+            houseVec(0) = 1.0f;
             outrow(0) = miu;
             outQueue.Enque(outrow);
 
@@ -288,9 +291,10 @@ private:
     }
     __aicore__ inline void ApplyColumnTransform(int32_t i)
     {
+
         // 应用列变换到右侧子矩阵
         const int32_t len = _m - i;
-        float beta = tauq_.Get<float>()(i);
+        float beta = tauq(i);
         if (beta == 0)
         {
             return;
@@ -306,9 +310,6 @@ private:
             // Compute
             col = inQueue.DeQue<float>();
             AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
-            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
-            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
-            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
             // vt*col
             AscendC::Mul(vectmp, col, houseVec, len * CONCURRENT_COL_CNT);
             AscendC::ReduceSum(scalartmp, vectmp, outcol,len*CONCURRENT_COL_CNT));
@@ -331,7 +332,7 @@ private:
         // 应用行变换到下方子矩阵A[i+1:m,i+1:n]
         const int32_t len = n_ - i - 1;
         const int32_t padLen = len % 8 == 0 ? 0 : 8 - len % 8, ttl = len + padLen;
-        float beta = taup_.Get<float>()(i);
+        float beta = taup(i);
         if (beta == 0)
         {
             return;
@@ -346,9 +347,6 @@ private:
             // Compute
             row = inQueue.DeQue<float>();
             AscendC::LocalTensor<float> outrow = outQueue.AllocTensor<float>();
-            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
-            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
-            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
             // row*v
             AscendC::Mul(vectmp, row, houseVec, ttl);
             AscendC::ReduceSum(scalartmp, vectmp, outrow, ttl);
@@ -369,16 +367,74 @@ private:
 
     __aicore__ inline void GetUVt()
     {
+        //get U
+        for(int32_t i=n_-1;i>=0;i--)
+        {
+            //the i-th householder vector updates m_-i columns of U
+            const int32_t len=m_-i;
+            auto beta=tauq(i);
+            if(beta==0)
+            {
+                continue;
+            }
+
+
+            // 加载当前houseVec
+            col = inQueue.AllocTensor<float>();
+            AscendC::DataCopyPad(col, aGm[i * n_ +i], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
+            inQueue.EnQue(col);
+            col = inQueue.DeQue<float>();
+            AscendC::Adds(houseVec, col, .0f, len*CONCURRENT_COL_CNT);
+            houseVec(0)=1.0f;
+            inQueue.FreeTensor(col);
+            
+            for (int32_t j = i; j < m_; j++)
+            {
+
+            // Compute
+            col = inQueue.DeQue<float>();
+            AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
+            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
+            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
+            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
+            
+            // col*v
+            AscendC::Mul(vectmp, col, houseVec, len);
+            AscendC::ReduceSum(scalartmp, vectmp, outcol, len);
+            
+            // beta*col*v
+            float beta = tauq_.Get<float>()(i);
+            AscendC::Muls(scalartmp, scalartmp, beta, 1);
+            AscendC::Muls(vectmp, houseVec, scalartmp(0), len);
+            
+            // col - beta*col*v*vT
+            Ascend::Sub(outcol, col, vectmp, len);
+            inQueue.FreeTensor(col);
+            outQueue.Enque(outcol);
+
+            // copy out
+            outcol = outQueue.Deque<float>();
+            AscendC::DataCopy(uGm[j * m_ + i], outcol, {len, 1, m_, 0});
+            outQueue.FreeTensor(outcol);
+            }
+        }
+        //get Vt
+        for(int32_t i=n_-1;i>=0;i--)
+        {
+            //the i-th householder vector updates n_-i rows of Vt
+            const int32_t len=n_-i;
+        }
+
     }
-    __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt, int M, int N)
+    __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt)
     {
         auto addr = reinterpret_cast<float *>(u);
-        for (int32_t i = 0; i < M; i++)
+        for (int32_t i = 0; i < m_; i++)
         {
             addr[i * m_ + i] = 1.0f;
         }
         addr = reinterpret_cast<float *>(vt);
-        for (int32_t i = 0; i < N; i++)
+        for (int32_t i = 0; i < n_; i++)
         {
             addr[i * n_ + i] = 1.0f;
         }
@@ -393,7 +449,7 @@ private:
     AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, scalarTmp, vecTmp;
     // AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
     AscendC::GlobalTensor<float> aGm, uGm, vtGm;
-    AscendC::LocalTensor<float> col, row;
+    AscendC::LocalTensor<float> col, row, houseVec, scalartmp, vectmp, taup, tauq;
 };
 
 extern "C" __global__ __aicore__ void upper_bidiagonalization(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N)
