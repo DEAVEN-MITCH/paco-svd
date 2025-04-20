@@ -33,7 +33,9 @@ public:
         pipe.InitBuffer(e_, (N - 1) * sizeof(float));
         pipe.InitBuffer(tauq_, N * sizeof(float));
         pipe.InitBuffer(taup_, (N - 1) * sizeof(float));
-        pipe.InitBuffer(householder_vec, M * BlockSize); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
+        pipe.InitBuffer(householder_vec, M * BlockSize);
+        pipe.InitBuffer(scalarTmp, sizeof(float));
+        pipe.InitBuffer(vecTmp, M * BlockSize);
         // pipe.InitBuffer(householder_vec, M * BlockSize + SizePerOperation); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
         // reduce sum need at most M
         // pipe.InitBuffer(worktmp, M * BlockSize + SizePerOperation);
@@ -64,100 +66,100 @@ public:
     }
 
 private:
-    // __aicore__ inline void ComputeColumnHouseholder(int32_t i)
-    // {
-    //     assert(i < n_ && "in ComputeColumnHouseholder, i should be less than n_");
-    //     const int32_t len = _m - i;
-    //     if (len <= 1)
-    //     {
-    //         // a scalar vector, no need to calc,beta=0;
-    //         tauq_(i) = 0;
-    //         return;
-    //     }
-    //     // col= colQueue.AllocTensor<float>();
-    //     col = colBuf.Get<float>();
-    //     const auto floor_i = (i / CONCURRENT_COL_CNT) * CONCURRENT_COL_CNT, offset_i = i % CONCURRENT_COL_CNT;
-    //     uint64_t mask[1] = {MASK_PATTERN << offset_i};
-    //     // const uint8_t repeatTimes = (len - 1) / BlockNumPerOperation, tailSize = (len - 1) % BlockNumPerOperation;
-    //     // const uint64_t tailOffset = repeatTimes * SizePerOperation + CONCURRENT_COL_CNT;
-    //     // if tailSize > 0,only tailSize个 bit is 1
-    //     // uint64_t tailMask[1] = {MASK_PATTERN << (CONCURRENT_COL_CNT * (BlockNumPerOperation - tailSize))};
-    //     // 加载当前列,floor_i 列的block，加载M-i块
-    //     AscendC::DataCopy(col, aGm[floor_i * n_], {len, 1, n_ / CONCURRENT_COL_CNT, 0});
-    //     // colQueue.EnQue(col);
+    /*     __aicore__ inline void ComputeColumnHouseholder(int32_t i)
+        {
+            assert(i < n_ && "in ComputeColumnHouseholder, i should be less than n_");
+            const int32_t len = _m - i;
+            if (len <= 1)
+            {
+                // a scalar vector, no need to calc,beta=0;
+                tauq_(i) = 0;
+                return;
+            }
+            // col= colQueue.AllocTensor<float>();
+            col = colBuf.Get<float>();
+            const auto floor_i = (i / CONCURRENT_COL_CNT) * CONCURRENT_COL_CNT, offset_i = i % CONCURRENT_COL_CNT;
+            uint64_t mask[1] = {MASK_PATTERN << offset_i};
+            // const uint8_t repeatTimes = (len - 1) / BlockNumPerOperation, tailSize = (len - 1) % BlockNumPerOperation;
+            // const uint64_t tailOffset = repeatTimes * SizePerOperation + CONCURRENT_COL_CNT;
+            // if tailSize > 0,only tailSize个 bit is 1
+            // uint64_t tailMask[1] = {MASK_PATTERN << (CONCURRENT_COL_CNT * (BlockNumPerOperation - tailSize))};
+            // 加载当前列,floor_i 列的block，加载M-i块
+            AscendC::DataCopy(col, aGm[floor_i * n_], {len, 1, n_ / CONCURRENT_COL_CNT, 0});
+            // colQueue.EnQue(col);
 
-    //     // Vector Compute
-    //     // col = colQueue.DeQue<float>();
-    //     // AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
-    //     AscendC::LocalTensor<float> outcol = outBuf.Get<float>();
-    //     AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
-    //     // pad the tail operation blocks with 0
-    //     AscendC::Duplicate(col[len * CONCURRENT_COL_CNT], .0f, BlockNumPerOperation * CONCURRENT_COL_CNT);
-    //     // copy col to outcol
-    //     AscendC::Adds(outcol, col, .0f, len * CONCURRENT_COL_CNT);
-    //     // get the first element of x
-    //     auto x1 = col(offset_i);
-    //     // calculate the 2-norm of x except the first element
-    //     // round up repeatTimes to deal the tail together
-    //     AscendC::Mul(tmp, col[CONCURRENT_COL_CNT], col[CONCURRENT_COL_CNT], mask, (len - 1 + BlockNumPerOperation - 1) / BlockNumPerOperation, {1, 1, 1, BlockNumPerOperation, BlockNumPerOperation, BlockNumPerOperation});
-    //     // use col as tmp worklocal space,col[0]=x(2:)Tx(2:)
-    //     AscendC::ReduceSum(col, tmp, col[CONCURRENT_COL_CNT], mask, (len - 1 + BlockNumPerOperation - 1) / BlockNumPerOperation, BlockNumPerOperation);
-    //     // update tauq_[i] as beta,
-    //     auto sigma = col(0);
-    //     colQueue.FreeTensor(col);
-    //     if (sigma == 0)
-    //     {
-    //         // zero but x1
-    //         if (x1 >= 0)
-    //         {
-    //             tauq_(i) = 0;
-    //             // since beta is 0,no need to update other columns
-    //             // and nothing changes to the A matrix
-    //         }
-    //         else
-    //         {
-    //             tauq_(i) = -2;
-    //             AscendC::Duplicate(tmp, .0f, len * CONCURRENT_COL_CNT);
-    //             // v1=1.0f
-    //             tmp(offset_i) = 1.0f;
-    //             // in column i only changes the A[i][i] to its negative,which is -outcol(offset_i)
-    //             aGm[i * n_ + i] = -outcol(offset_i);
-    //             // TODO check whether this practice is fine
-    //             //  outQueue.FreeTensor(outcol);
-    //         }
-    //     }
-    //     else
-    //     {
-    //         auto miu = std::sqrt(x1 * x1 + sigma);
-    //         float v1;
-    //         if (x1 <= 0)
-    //         { // update v1,aka,tmp(offset_i)
-    //             v1 = x1 - miu;
-    //         }
-    //         else
-    //         {
-    //             v1 = -sigma / (x1 + miu);
-    //         }
-    //         float v1sq = v1 * v1;
-    //         tauq_(i) = 2 * v1sq / (sigma + v1sq);
-    //         // calculate the essential householder vector
-    //         AscendC::Muls(outcol, outcol, 1.0f / v1, mask, (len + BlockNumPerOperation - 1) / BlockNumPerOperation, {1, 1, BlockNumPerOperation, BlockNumPerOperation});
-    //         // construct the householder vector v,use adds 0 to copy conveniently
-    //         AscendC::Adds(tmp, outcol, .0f, len * CONCURRENT_COL_CNT);
-    //         // update final v1 and final A[i][i] using tmp and outcol
-    //         tmp(offset_i) = 1.0f;
-    //         outcol(offset_i) = miu; // 2-norm of x
-    //         // outQueue.Enque(outcol);
+            // Vector Compute
+            // col = colQueue.DeQue<float>();
+            // AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
+            AscendC::LocalTensor<float> outcol = outBuf.Get<float>();
+            AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
+            // pad the tail operation blocks with 0
+            AscendC::Duplicate(col[len * CONCURRENT_COL_CNT], .0f, BlockNumPerOperation * CONCURRENT_COL_CNT);
+            // copy col to outcol
+            AscendC::Adds(outcol, col, .0f, len * CONCURRENT_COL_CNT);
+            // get the first element of x
+            auto x1 = col(offset_i);
+            // calculate the 2-norm of x except the first element
+            // round up repeatTimes to deal the tail together
+            AscendC::Mul(tmp, col[CONCURRENT_COL_CNT], col[CONCURRENT_COL_CNT], mask, (len - 1 + BlockNumPerOperation - 1) / BlockNumPerOperation, {1, 1, 1, BlockNumPerOperation, BlockNumPerOperation, BlockNumPerOperation});
+            // use col as tmp worklocal space,col[0]=x(2:)Tx(2:)
+            AscendC::ReduceSum(col, tmp, col[CONCURRENT_COL_CNT], mask, (len - 1 + BlockNumPerOperation - 1) / BlockNumPerOperation, BlockNumPerOperation);
+            // update tauq_[i] as beta,
+            auto sigma = col(0);
+            colQueue.FreeTensor(col);
+            if (sigma == 0)
+            {
+                // zero but x1
+                if (x1 >= 0)
+                {
+                    tauq_(i) = 0;
+                    // since beta is 0,no need to update other columns
+                    // and nothing changes to the A matrix
+                }
+                else
+                {
+                    tauq_(i) = -2;
+                    AscendC::Duplicate(tmp, .0f, len * CONCURRENT_COL_CNT);
+                    // v1=1.0f
+                    tmp(offset_i) = 1.0f;
+                    // in column i only changes the A[i][i] to its negative,which is -outcol(offset_i)
+                    aGm[i * n_ + i] = -outcol(offset_i);
+                    // TODO check whether this practice is fine
+                    //  outQueue.FreeTensor(outcol);
+                }
+            }
+            else
+            {
+                auto miu = std::sqrt(x1 * x1 + sigma);
+                float v1;
+                if (x1 <= 0)
+                { // update v1,aka,tmp(offset_i)
+                    v1 = x1 - miu;
+                }
+                else
+                {
+                    v1 = -sigma / (x1 + miu);
+                }
+                float v1sq = v1 * v1;
+                tauq_(i) = 2 * v1sq / (sigma + v1sq);
+                // calculate the essential householder vector
+                AscendC::Muls(outcol, outcol, 1.0f / v1, mask, (len + BlockNumPerOperation - 1) / BlockNumPerOperation, {1, 1, BlockNumPerOperation, BlockNumPerOperation});
+                // construct the householder vector v,use adds 0 to copy conveniently
+                AscendC::Adds(tmp, outcol, .0f, len * CONCURRENT_COL_CNT);
+                // update final v1 and final A[i][i] using tmp and outcol
+                tmp(offset_i) = 1.0f;
+                outcol(offset_i) = miu; // 2-norm of x
+                // outQueue.Enque(outcol);
 
-    //         // outcol=outQueue.Deque<float>();
-    //         AscendC::DataCopy(aGm[floor_i * n_], outcol, {len, 1, 0, n_ / CONCURRENT_COL_CNT});
-    //     }
-    // }
-   
+                // outcol=outQueue.Deque<float>();
+                AscendC::DataCopy(aGm[floor_i * n_], outcol, {len, 1, 0, n_ / CONCURRENT_COL_CNT});
+            }
+        }
+        */
     __aicore__ inline void ComputeColumnHouseholder(int32_t i)
     {
         assert(i < n_ && "in ComputeColumnHouseholder, i should be less than n_");
-        const int32_t len = _m - i;
+        const int32_t len = m_ - i;
         auto tauq = tauq_.Get<float>();
         if (len <= 1)
         {
@@ -169,7 +171,7 @@ private:
         // 加载当前i列的共len个数据,use 0.0f to pad right
         col = inQueue.AllocTensor<float>();
         // use 0.0f to pad right
-        AscendC::DataCopyPad(col, aGm[i * n_ + i], {len, 4, n_ * sizeof(float), 0}, {true, 0, 28, 0.0f});
+        AscendC::DataCopyPad(col, aGm[i * n_ + i], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
         inQueue.EnQue(col);
 
         // Vector Compute
@@ -227,99 +229,172 @@ private:
     }
     __aicore__ inline void ComputeRowHouseholder(int32_t i)
     {
-        AscendC::LocalTensor<float> row = rowQueue.AllocTensor<float>();
+        assert(i < n_ - 1 && "in ComputeRowHouseholder, i should be less than n_ - 1");
+        const int32_t len = n_ - i - 1;
+        const int32_t padLen = len % 8 == 0 ? 0 : 8 - len % 8, ttl = len + padLen;
+        auto taup = taup_.Get<float>();
+        if (len <= 1)
+        {
+            taup(i) = 0;
+            return;
+        }
+        // Copy in
+        row = inQueue.AllocTensor<float>();
+        AscendC::DataCopyPad(row, aGm[i * n_ + i + 1], {1, len * 4, 0, 0}, {true, 0, padLen, 0.0f});
+        inQueue.EnQue(row);
 
-        // 加载当前行
-        LoadRow(row, i, i + 1);
+        // Vector Compute
+        row = inQueue.DeQue<float>();
+        AscendC::LocalTensor<float> outrow = outQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp = householder_vec.Get<float>();
+        AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
+        // copy row to outrow
+        AscendC::Adds(outrow, row, 0.0f, ttl);
+        auto x1 = row(0);
+        row(0) = 0.0f; // to calculate x[2:len]Tx[2:len]
+        AscendC::Mul(tmp, row, row, ttl);
+        AscendC::ReduceSum(row, tmp, row[CONCURRENT_COL_CNT], ttl);
+        auto sigma = row(0);
+        inQueue.FreeTensor(row);
+        if (sigma == 0)
+        {
+            taup(i) = 0;
+            outQueue.FreeTensor(outrow);
+        }
+        else
+        {
+            auto miu = std::sqrt(x1 * x1 + sigma);
+            float v1;
+            if (x1 <= 0)
+            {
+                v1 = x1 - miu;
+            }
+            else
+            {
+                v1 = -sigma / (x1 + miu);
+            }
+            float v1sq = v1 * v1;
+            taup(i) = 2 * v1sq / (sigma + v1sq);
+            AscendC::Muls(outrow, outrow, 1.0f / v1, ttl);
+            AscendC::Adds(tmp, outrow, 0.0f, ttl);
+            tmp(0) = 1.0f;
+            outrow(0) = miu;
+            outQueue.Enque(outrow);
 
-        // 计算Householder向量
-        float norm = ComputeNorm(row);
-        e_[i] = (row[0] >= 0) ? -norm : norm;
-
-        // 计算tau
-        float alpha = e_[i];
-        taup_[i] = (alpha - row[0]) / alpha;
-
-        // 更新行向量
-        row[0] = alpha;
-
-        // 存储更新后的行
-        StoreRow(row, i, i + 1);
-
-        rowQueue.FreeTensor(row);
+            outrow = outQueue.Deque<float>();
+            AscendC::DataCopyPad(aGm[i * n_ + i + 1], outrow, {1, len * 4, 0, 0});
+            outQueue.FreeTensor(outrow);
+        }
     }
     __aicore__ inline void ApplyColumnTransform(int32_t i)
     {
         // 应用列变换到右侧子矩阵
-        // CONCURRENT_COL_CNT apply if possible
-        AscendC::LocalTensor<float> col = colBuf.Get<float>();
-        int32_t former_j = -1;
         const int32_t len = _m - i;
+        float beta = tauq_.Get<float>()(i);
+        if (beta == 0)
+        {
+            return;
+        }
         for (int32_t j = i + 1; j < n_; j++)
         {
-            int32_t floor_j = (j / CONCURRENT_COL_CNT) * CONCURRENT_COL_CNT, offset_j = j % CONCURRENT_COL_CNT;
-            if (floor_j != former_j)
-            {
-                // load the block
-                former_j = floor_j;
-                AscendC::DataCopy(col, aGm[floor_j * n_], {len, 1, n_ / CONCURRENT_COL_CNT, 0});
-            }
-            // data loaded in col,create the mask
+
+            // data loaded in col
+            col = inQueue.AllocTensor<float>();
+            AscendC::DataCopyPad(col, aGm[i * n_ + j], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
+            inQueue.EnQue(col);
+
+            // Compute
+            col = inQueue.DeQue<float>();
+            AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
+            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
+            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
+            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
+            // vt*col
+            AscendC::Mul(vectmp, col, houseVec, len * CONCURRENT_COL_CNT);
+            AscendC::ReduceSum(scalartmp, vectmp, outcol,len*CONCURRENT_COL_CNT));
+            // bete*vt*col
+            AscendC::Muls(scalartmp, scalartmp, beta, 1);
+            AscendC::Muls(vectmp, houseVec, scalartmp(0), len * CONCURRENT_COL_CNT);
+            // col - beta*vt*col*v
+            Ascend::Sub(outcol, col, vectmp, len * CONCURRENT_COL_CNT);
+            inQueue.FreeTensor(col);
+            outQueue.Enque(outcol);
+
+            // copy out
+            outcol = outQueue.Deque<float>();
+            AscendC::DataCopyPad(aGm[i * n_ + j], outcol, {len, 4, 0, n_ * sizeof(float)});
+            outQueue.FreeTensor(outcol);
         }
     }
     __aicore__ inline void ApplyRowTransform(int32_t i)
     {
-        // 应用行变换到下方子矩阵
+        // 应用行变换到下方子矩阵A[i+1:m,i+1:n]
+        const int32_t len = n_ - i - 1;
+        const int32_t padLen = len % 8 == 0 ? 0 : 8 - len % 8, ttl = len + padLen;
+        float beta = taup_.Get<float>()(i);
+        if (beta == 0)
+        {
+            return;
+        }
         for (int32_t j = i + 1; j < m_; j++)
         {
-            UpdateRow(i, j);
+            // 加载当前行
+            row = inQueue.AllocTensor<float>();
+            AscendC::DataCopyPad(row, aGm[j * n_ + i + 1], {1, len * 4, 0, 0}, {true, 0, padLen, 0.0f});
+            inQueue.EnQue(row);
+
+            // Compute
+            row = inQueue.DeQue<float>();
+            AscendC::LocalTensor<float> outrow = outQueue.AllocTensor<float>();
+            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
+            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
+            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
+            // row*v
+            AscendC::Mul(vectmp, row, houseVec, ttl);
+            AscendC::ReduceSum(scalartmp, vectmp, outrow, ttl);
+            // beta*row*v
+            AscendC::Muls(scalartmp, scalartmp, beta, 1);
+            AscendC::Muls(vectmp, houseVec, scalartmp(0), ttl);
+            // row - beta*row*v*vT
+            Ascend::Sub(outrow, row, vectmp, ttl);
+            inQueue.FreeTensor(row);
+            outQueue.Enque(outrow);
+
+            // copy out
+            outrow = outQueue.Deque<float>();
+            AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, {1, len * 4, 0, 0});
+            outQueue.FreeTensor(outrow);
         }
     }
 
-    __aicore__ inline void UpdateRow(int32_t i, int32_t j)
+    __aicore__ inline void GetUVt()
     {
-        AscendC::LocalTensor<float> row = rowQueue.AllocTensor<float>();
-        AscendC::LocalTensor<float> result = outQueue.AllocTensor<float>();
-
-        // 加载行
-        LoadRow(row, i, j);
-
-        // 应用Householder变换
-        ApplyHouseholderTransform(row, result, taup_[i]);
-
-        // 存储结果
-        StoreRow(result, i, j);
-
-        rowQueue.FreeTensor(row);
-        outQueue.FreeTensor(result);
     }
-     __aicore__ inline void GetUVt())
-     {
-     }
-     __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt, int M, int N)
-     {
-         auto addr = reinterpret_cast<float *>(u);
-         for (int32_t i = 0; i < M; i++)
-         {
-             addr[i * m_ + i] = 1.0f;
-         }
-         addr = reinterpret_cast<float *>(vt);
-         for (int32_t i = 0; i < N; i++)
-         {
-             addr[i * n_ + i] = 1.0f;
-         }
-     }
-} private : int32_t m_, n_, k_;
-AscendC::TPipe pipe;
-AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
-AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-// AscendC::TBuf<AscendC::TPosition::VECCALC> colBuf, rowBuf, outBuf;
-AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec;
-// AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
-AscendC::GlobalTensor<float> aGm, uGm, vtGm;
-AscendC::LocalTensor<float> col, row;
-}
-;
+    __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt, int M, int N)
+    {
+        auto addr = reinterpret_cast<float *>(u);
+        for (int32_t i = 0; i < M; i++)
+        {
+            addr[i * m_ + i] = 1.0f;
+        }
+        addr = reinterpret_cast<float *>(vt);
+        for (int32_t i = 0; i < N; i++)
+        {
+            addr[i * n_ + i] = 1.0f;
+        }
+    }
+
+private:
+    int32_t m_, n_, k_;
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    // AscendC::TBuf<AscendC::TPosition::VECCALC> colBuf, rowBuf, outBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, scalarTmp, vecTmp;
+    // AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
+    AscendC::GlobalTensor<float> aGm, uGm, vtGm;
+    AscendC::LocalTensor<float> col, row;
+};
 
 extern "C" __global__ __aicore__ void upper_bidiagonalization(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N)
 {
