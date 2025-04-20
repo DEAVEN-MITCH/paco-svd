@@ -307,19 +307,7 @@ private:
             AscendC::DataCopyPad(col, aGm[i * n_ + j], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
             inQueue.EnQue(col);
 
-            // Compute
-            col = inQueue.DeQue<float>();
-            AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
-            // vt*col
-            AscendC::Mul(vectmp, col, houseVec, len * CONCURRENT_COL_CNT);
-            AscendC::ReduceSum(scalartmp, vectmp, outcol,len*CONCURRENT_COL_CNT));
-            // bete*vt*col
-            AscendC::Muls(scalartmp, scalartmp, beta, 1);
-            AscendC::Muls(vectmp, houseVec, scalartmp(0), len * CONCURRENT_COL_CNT);
-            // col - beta*vt*col*v
-            Ascend::Sub(outcol, col, vectmp, len * CONCURRENT_COL_CNT);
-            inQueue.FreeTensor(col);
-            outQueue.Enque(outcol);
+            ApplyTransformCore(len*CONCURRENT_COL_CNT,beta);
 
             // copy out
             outcol = outQueue.Deque<float>();
@@ -344,6 +332,18 @@ private:
             AscendC::DataCopyPad(row, aGm[j * n_ + i + 1], {1, len * 4, 0, 0}, {true, 0, padLen, 0.0f});
             inQueue.EnQue(row);
 
+            ApplyTransformCore(ttl,beta);
+
+            // copy out
+            outrow = outQueue.Deque<float>();
+            AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, {1, len * 4, 0, 0});
+            outQueue.FreeTensor(outrow);
+        }
+    }
+
+    __aicore__ inline void ApplyTransformCore(const int32_t ttl,const float beta)
+    {
+            //the col compute is the same as the row compute
             // Compute
             row = inQueue.DeQue<float>();
             AscendC::LocalTensor<float> outrow = outQueue.AllocTensor<float>();
@@ -357,14 +357,7 @@ private:
             Ascend::Sub(outrow, row, vectmp, ttl);
             inQueue.FreeTensor(row);
             outQueue.Enque(outrow);
-
-            // copy out
-            outrow = outQueue.Deque<float>();
-            AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, {1, len * 4, 0, 0});
-            outQueue.FreeTensor(outrow);
-        }
     }
-
     __aicore__ inline void GetUVt()
     {
         //get U
