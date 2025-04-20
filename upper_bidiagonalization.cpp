@@ -310,7 +310,7 @@ private:
             ApplyTransformCore(len*CONCURRENT_COL_CNT,beta);
 
             // copy out
-            outcol = outQueue.Deque<float>();
+            AscendC::LocalTensor<float> outcol = outQueue.Deque<float>();
             AscendC::DataCopyPad(aGm[i * n_ + j], outcol, {len, 4, 0, n_ * sizeof(float)});
             outQueue.FreeTensor(outcol);
         }
@@ -335,7 +335,7 @@ private:
             ApplyTransformCore(ttl,beta);
 
             // copy out
-            outrow = outQueue.Deque<float>();
+            AscendC::LocalTensor<float> outrow = outQueue.Deque<float>();
             AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, {1, len * 4, 0, 0});
             outQueue.FreeTensor(outrow);
         }
@@ -374,7 +374,7 @@ private:
 
             // 加载当前houseVec
             col = inQueue.AllocTensor<float>();
-            AscendC::DataCopyPad(col, aGm[i * n_ +i], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
+            AscendC::DataCopyPad(col, aGm[i * n_ + i], {len, 4, n_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
             inQueue.EnQue(col);
             col = inQueue.DeQue<float>();
             AscendC::Adds(houseVec, col, .0f, len*CONCURRENT_COL_CNT);
@@ -383,41 +383,54 @@ private:
             
             for (int32_t j = i; j < m_; j++)
             {
+                col=inQueue.AllocTensor<float>();
+                AscendC::DataCopyPad(col, uGm[i * m_ + j], {len, 4, m_ * sizeof(float), 0}, {true, 0, 7, 0.0f});
+                inQueue.EnQue(col);
 
-            // Compute
-            col = inQueue.DeQue<float>();
-            AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
-            AscendC::LocalTensor<float> houseVec = householder_vec.Get<float>();
-            AscendC::LocalTensor<float> scalartmp = scalarTmp.Get<float>();
-            AscendC::LocalTensor<float> vectmp = vecTmp.Get<float>();
-            
-            // col*v
-            AscendC::Mul(vectmp, col, houseVec, len);
-            AscendC::ReduceSum(scalartmp, vectmp, outcol, len);
-            
-            // beta*col*v
-            float beta = tauq_.Get<float>()(i);
-            AscendC::Muls(scalartmp, scalartmp, beta, 1);
-            AscendC::Muls(vectmp, houseVec, scalartmp(0), len);
-            
-            // col - beta*col*v*vT
-            Ascend::Sub(outcol, col, vectmp, len);
-            inQueue.FreeTensor(col);
-            outQueue.Enque(outcol);
+                ApplyTransformCore(len*CONCURRENT_COL_CNT,beta);
 
-            // copy out
-            outcol = outQueue.Deque<float>();
-            AscendC::DataCopy(uGm[j * m_ + i], outcol, {len, 1, m_, 0});
-            outQueue.FreeTensor(outcol);
+                // copy out
+                AscendC::LocalTensor<float> outcol = outQueue.Deque<float>();
+                AscendC::DataCopyPad(uGm[i * m_ + j], outcol, {len, 4, 0, m_ * sizeof(float)});
+
+                outQueue.FreeTensor(outcol);
             }
         }
         //get Vt
-        for(int32_t i=n_-1;i>=0;i--)
+        for(int32_t i=n_-2;i>=0;i--)
         {
-            //the i-th householder vector updates n_-i rows of Vt
-            const int32_t len=n_-i;
-        }
+            //the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
+            const int32_t len=n_-i-1;
+            const int32_t padLen = len % 8 == 0 ? 0 : 8 - len % 8, ttl = len + padLen;
+            auto beta=taup(i);
+            if(beta==0)
+            {
+                continue;
+            }
 
+            // 加载当前houseVec
+            row = inQueue.AllocTensor<float>();
+            AscendC::DataCopyPad(row, aGm[i * n_ + i + 1], {1, len * 4, 0, 0}, {true, 0, padLen, 0.0f});
+            inQueue.EnQue(row);
+            row = inQueue.DeQue<float>();
+            AscendC::Adds(houseVec, row, .0f, ttl);
+            houseVec(0) = 1.0f;
+            inQueue.FreeTensor(row);
+
+            for (int32_t j = i; j < n_; j++)
+            {
+                row = inQueue.AllocTensor<float>();
+                AscendC::DataCopyPad(row, vtGm[j * n_ + i+1], {1, len * 4, 0, 0}, {true, 0, padLen, 0.0f});
+                inQueue.EnQue(row);
+
+                ApplyTransformCore(ttl, beta);
+
+                // copy out
+                AscendC::LocalTensor<float> outrow = outQueue.Deque<float>();
+                AscendC::DataCopyPad(vtGm[j * n_ + i+1], outrow, {1, len * 4, 0, 0});
+                outQueue.FreeTensor(outrow);
+            }
+        }
     }
     __aicore__ inline void initUV(GM_ADDR u, GM_ADDR vt)
     {
