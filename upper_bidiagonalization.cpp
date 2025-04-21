@@ -14,8 +14,9 @@ class Kernel_Golub_Kahan_Bidiagonalization
 {
 public:
     __aicore__ inline Kernel_Golub_Kahan_Bidiagonalization() {}
-    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N)
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N, GM_ADDR d, GM_ADDR e)
     {
+        if(AscendC::GetBlockIdx()!=0)return;
         m_ = M;
         n_ = N;
         ASSERT(M >= N && "in Init, we should have M>=N");
@@ -25,6 +26,8 @@ public:
         aGm.SetGlobalBuffer((__gm__ float *)a, M * N);
         uGm.SetGlobalBuffer((__gm__ float *)u, M * M);
         vtGm.SetGlobalBuffer((__gm__ float *)vt, N * N);
+        dGm.SetGlobalBuffer((__gm__ float *)d, N);
+        eGm.SetGlobalBuffer((__gm__ float *)e, N - 1);
 
         initUV();
 
@@ -54,9 +57,11 @@ public:
     }
     __aicore__ inline void Process()
     {
+        if(AscendC::GetBlockIdx()!=0)return;
         // 主循环：对每一列和行进行Householder变换
         for (int32_t i = 0; i < n_; i++)
         {
+            // AscendC::printf("ith column transform: %d\n", i);
             if (i < n_)
             {
                 // 计算列的Householder变换
@@ -64,7 +69,8 @@ public:
                 // 应用列变换到剩余的矩阵
                 ApplyColumnTransform(i);
             }
-
+            
+            // AscendC::printf("ith row transform: %d\n", i);
             if (i < n_ - 1)
             {
                 // 计算行的Householder变换
@@ -176,18 +182,20 @@ private:
         {
             // a scalar vector, no need to calc,beta=0;
             tauq(i) = 0;
+            dGm(i) = aGm(i * n_ + i);
             return;
         }
 
         // 加载当前i列的共len个数据,use 0.0f to pad right
         col = inQueue.AllocTensor<float>();
         // use 0.0f to pad right
-        const AscendC::DataCopyExtParams dataCopyExtParams={len,4,n_ * sizeOfFloat,0,0};
+        const AscendC::DataCopyExtParams dataCopyExtParams={len,4,(n_-1) * sizeOfFloat,0,0};
         AscendC::DataCopyPad(col, aGm[i * n_ + i], dataCopyExtParams, colPadParams);
         inQueue.EnQue(col);
 
         // Vector Compute
         col = inQueue.DeQue<float>();
+        // DumpTensor(col,5, 6 * CONCURRENT_COL_CNT);
         AscendC::LocalTensor<float> outcol = outQueue.AllocTensor<float>();
         // copy col to outcol
         AscendC::Adds(outcol, col, .0f, len * CONCURRENT_COL_CNT);
@@ -205,6 +213,7 @@ private:
         {
             // x[2:m] are all zero
             tauq(i) = 0;
+            dGm(i) = x1;
             // since beta is 0,no need to update other columns
             // and nothing changes to the A matrix
             // TODO check whether this practice is fine
@@ -231,10 +240,14 @@ private:
             // update final v1 and final A[i][i] using tmp and outcol
             houseVec(0) = 1.0f;
             outcol(0) = miu; // 2-norm of x
+            dGm(i) = miu;
+            
             outQueue.EnQue(outcol);
+            // DumpTensor(outcol,5, 6 * CONCURRENT_COL_CNT);
 
             outcol = outQueue.DeQue<float>();
-            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,0,n_ * sizeOfFloat,0};
+
+            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,0,(n_-1) * sizeOfFloat,0};
             AscendC::DataCopyPad(aGm[i * n_ + i], outcol, dataCopyExtParams);
             outQueue.FreeTensor(outcol);
         }
@@ -245,10 +258,10 @@ private:
         const uint16_t len = n_ - i - 1;
         const uint8_t padLen = len % 8 == 0 ? 0 : 8 - len % 8;
         const uint32_t ttl = len + padLen;
-        auto taup = taup_.Get<float>();
         if (len <= 1)
         {
             taup(i) = 0;
+            eGm(i) = aGm(i * n_ + i + 1);
             return;
         }
         // Copy in
@@ -272,6 +285,7 @@ private:
         if (sigma == 0)
         {
             taup(i) = 0;
+            eGm(i) = x1;
             outQueue.FreeTensor(outrow);
         }
         else
@@ -292,6 +306,7 @@ private:
             AscendC::Adds(houseVec, outrow, 0.0f, ttl);
             houseVec(0) = 1.0f;
             outrow(0) = miu;
+            eGm(i) = miu;
             outQueue.EnQue(outrow);
 
             outrow = outQueue.DeQue<float>();
@@ -315,16 +330,17 @@ private:
 
             // data loaded in col
             col = inQueue.AllocTensor<float>();
-            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,n_ * sizeOfFloat,0,0};
+            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,(n_-1) * sizeOfFloat,0,0};
             AscendC::DataCopyPad(col, aGm[i * n_ + j], dataCopyExtParams, colPadParams);
             inQueue.EnQue(col);
-
+            // DumpTensor(col,5, 6 * CONCURRENT_COL_CNT);
+            // AscendC::printf("in ApplyColumnTransform,i=%d,j=%d\n",i,j);
             ApplyTransformCore(len*CONCURRENT_COL_CNT,beta);
 
             // copy out
             AscendC::LocalTensor<float> outcol = outQueue.DeQue<float>();
-            const AscendC::DataCopyExtParams dataCopyExtParams2={len,4,0,n_ * sizeOfFloat,0};
-            AscendC::DataCopyPad(aGm[i * n_ + j], outcol, dataCopyExtParams);
+            const AscendC::DataCopyExtParams dataCopyExtParams2={len,4,0,(n_-1) * sizeOfFloat,0};
+            AscendC::DataCopyPad(aGm[i * n_ + j], outcol, dataCopyExtParams2);
             outQueue.FreeTensor(outcol);
         }
     }
@@ -353,7 +369,7 @@ private:
             // copy out
             AscendC::LocalTensor<float> outrow = outQueue.DeQue<float>();
             const AscendC::DataCopyExtParams dataCopyExtParams2={1,len*sizeOfFloat,0,0,0};
-            AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, dataCopyExtParams);
+            AscendC::DataCopyPad(aGm[j * n_ + i + 1], outrow, dataCopyExtParams2);
             outQueue.FreeTensor(outrow);
         }
     }
@@ -373,11 +389,26 @@ private:
             AscendC::Muls(vectmp, houseVec, coeff, ttl);
             // row - beta*row*v*vT
             AscendC::Sub(outrow, row, vectmp, ttl);
+            // AscendC::printf("outrow in ApplyTransformCore:\n");
+            // DumpTensor(outrow,5, 6 * CONCURRENT_COL_CNT);
+
             inQueue.FreeTensor(row);
             outQueue.EnQue(outrow);
     }
     __aicore__ inline void GetUVt()
     {
+        //print uGm
+        // {
+        //     for(int32_t i=0;i<m_;i++)
+        //     {
+        //         for(int32_t j=0;j<m_;j++)
+        //         {
+        //             AscendC::printf("uGm[%d][%d]=%f\n",i,j,uGm(i * m_ + j));
+        //         }
+        //     }
+        // }
+        //刷新Cache，保证uGm、vGm与Cache的一致性
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         //get U
         for(int32_t i=n_-1;i>=0;i--)
         {
@@ -392,31 +423,47 @@ private:
 
             // 加载当前houseVec
             col = inQueue.AllocTensor<float>();
-            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,n_ * sizeOfFloat,0,0};
+            const AscendC::DataCopyExtParams dataCopyExtParams={len,4,(n_-1) * sizeOfFloat,0,0};
             AscendC::DataCopyPad(col, aGm[i * n_ + i], dataCopyExtParams, colPadParams);
             inQueue.EnQue(col);
             col = inQueue.DeQue<float>();
             AscendC::Adds(houseVec, col, .0f, len*CONCURRENT_COL_CNT);
             houseVec(0)=1.0f;
+            // DumpTensor(houseVec,5, 6 * CONCURRENT_COL_CNT);
             inQueue.FreeTensor(col);
             
             for (int32_t j = i; j < m_; j++)
             {
                 col=inQueue.AllocTensor<float>();
-                const AscendC::DataCopyExtParams dataCopyExtParams={len,4,m_ * sizeOfFloat,0,0};
+                const AscendC::DataCopyExtParams dataCopyExtParams={len,4,(m_-1) * sizeOfFloat,0,0};
                 AscendC::DataCopyPad(col, uGm[i * m_ + j], dataCopyExtParams, colPadParams);
+                // AscendC::printf("col in GetUVt: ,i=%d,j=%d\n",i,j);
+                // DumpTensor(col, 5, 6 * CONCURRENT_COL_CNT);
                 inQueue.EnQue(col);
 
                 ApplyTransformCore(len*CONCURRENT_COL_CNT,beta);
 
                 // copy out
                 AscendC::LocalTensor<float> outcol = outQueue.DeQue<float>();
-                const AscendC::DataCopyExtParams dataCopyExtParams2={len,4,0,m_ * sizeOfFloat,0};
-                AscendC::DataCopyPad(uGm[i * m_ + j], outcol, dataCopyExtParams);
+                // AscendC::printf("outcol in GetUVt: ,i=%d,j=%d\n",i,j);
+                // DumpTensor(outcol, 5, 6 * CONCURRENT_COL_CNT);
+
+                const AscendC::DataCopyExtParams dataCopyExtParams2={len,4,0,(m_-1) * sizeOfFloat,0};
+                AscendC::DataCopyPad(uGm[i * m_ + j], outcol, dataCopyExtParams2);
 
                 outQueue.FreeTensor(outcol);
             }
         }
+                        // print uGm
+        // {
+        //     for(int32_t i=0;i<m_;i++)
+        //     {
+        //         for(int32_t j=0;j<m_;j++)
+        //         {
+        //             AscendC::printf("uGm[%d][%d]=%f\n",i,j,uGm(i * m_ + j));
+        //         }
+        //     }
+        // }
         //get Vt
         for(int32_t i=n_-2;i>=0;i--)
         {
@@ -453,13 +500,14 @@ private:
                 // copy out
                 AscendC::LocalTensor<float> outrow = outQueue.DeQue<float>();
                 const AscendC::DataCopyExtParams dataCopyExtParams2={1,len*sizeOfFloat,0,0,0};
-                AscendC::DataCopyPad(vtGm[j * n_ + i+1], outrow, dataCopyExtParams);
+                AscendC::DataCopyPad(vtGm[j * n_ + i+1], outrow, dataCopyExtParams2);
                 outQueue.FreeTensor(outrow);
             }
         }
     }
     __aicore__ inline void initUV()
     {
+        //cache 问题，AIV处理前需刷新Cache
         for (int32_t i = 0; i < m_; i++)
         {
             uGm(i * m_ + i) = 1.0f;
@@ -469,7 +517,6 @@ private:
             vtGm(i * n_ + i) = 1.0f;
         }
     }
-
 private:
     uint16_t m_, n_;
     // int32_t k_;
@@ -479,13 +526,13 @@ private:
     // AscendC::TBuf<AscendC::TPosition::VECCALC> colBuf, rowBuf, outBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, scalarTmp, vecTmp;
     // AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
-    AscendC::GlobalTensor<float> aGm, uGm, vtGm;
+    AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm;
     AscendC::LocalTensor<float> col, row, houseVec, scalartmp, vectmp, taup, tauq;
 };
 
-extern "C" __global__ __aicore__ void upper_bidiagonalization(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N)
+extern "C" __global__ __aicore__ void upper_bidiagonalization(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N, GM_ADDR d, GM_ADDR e)
 {
     Kernel_Golub_Kahan_Bidiagonalization kernel;
-    kernel.Init(a, u, vt, M, N);
+    kernel.Init(a, u, vt, M, N, d, e);
     kernel.Process();
 }

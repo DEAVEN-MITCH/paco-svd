@@ -19,11 +19,18 @@ int main(int argc, char **argv)
     args_file >> m_str >> n_str;
     M = std::stoi(m_str);
     N = std::stoi(n_str);
+    if(M<N)
+    {
+        std::cerr << "M must be greater than N" << std::endl;
+        return 0;
+    }
     int AicNum = ascendcPlatform->GetCoreNumAic();
     int AivNum = ascendcPlatform->GetCoreNumAiv();
     size_t UMatrixFileSize = M * M * sizeof(float);
     size_t AMatrixFileSize = M * N * sizeof(float);
     size_t VtMatrixFileSize = N * N * sizeof(float);
+    size_t DArrayFileSize = N * sizeof(float);
+    size_t EArrayFileSize = (N - 1) * sizeof(float);
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
     size_t userWorkspaceSize = 0;
     size_t systemWorkspaceSize = ascendcPlatform->GetLibApiWorkSpaceSize();
@@ -44,7 +51,8 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&AMatrixDevice, AMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     ReadFile("../input/A_gm.bin", AMatrixFileSize, AMatrixHost, AMatrixFileSize);
     CHECK_ACL(aclrtMemcpy(AMatrixDevice, AMatrixFileSize, AMatrixHost, AMatrixFileSize, ACL_MEMCPY_HOST_TO_DEVICE));
-
+    std::cout << "[MATRIX A]" << std::endl;
+    PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
     // uint8_t *TilingHost;
     // uint8_t *TilingDevice;
@@ -65,8 +73,19 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMallocHost((void **)(&VtMatrixHost), VtMatrixFileSize));
     CHECK_ACL(aclrtMalloc((void **)&VtMatrixDevice, VtMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     CHECK_ACL(aclrtMemset(VtMatrixDevice, VtMatrixFileSize, 0,VtMatrixFileSize));  
+
+    uint8_t *DArrayHost;
+    uint8_t *DArrayDevice;
+    CHECK_ACL(aclrtMallocHost((void **)(&DArrayHost), DArrayFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&DArrayDevice, DArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+
+    uint8_t *EArrayHost;
+    uint8_t *EArrayDevice;
+    CHECK_ACL(aclrtMallocHost((void **)(&EArrayHost), EArrayFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&EArrayDevice, EArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (1, stream, AMatrixDevice, UMatrixDevice, VtMatrixDevice, M, N);
+    (2, stream, AMatrixDevice, UMatrixDevice, VtMatrixDevice, M, N, DArrayDevice, EArrayDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
     std::cout << "finish" << std::endl;
@@ -74,12 +93,25 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(EArrayHost, EArrayFileSize, EArrayDevice, EArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    {
+        //construct B matrix from D and E
+        CHECK_ACL(aclrtMemset(AMatrixHost, AMatrixFileSize, 0, AMatrixFileSize));
+        for(int32_t i=0;i<N;i++)
+        {
+            reinterpret_cast<float*>(AMatrixHost)[i * N + i] = reinterpret_cast<float*>(DArrayHost)[i];
+            if(i<N-1)
+            reinterpret_cast<float*>(AMatrixHost)[i * N + i + 1] = reinterpret_cast<float*>(EArrayHost)[i];
+            
+        }
+    }
     WriteFile("../output/U.bin", UMatrixHost, UMatrixFileSize);
     WriteFile("../output/B.bin", AMatrixHost, AMatrixFileSize);
     WriteFile("../output/Vt.bin", VtMatrixHost, VtMatrixFileSize);
 
     std::cout << "[MATRIX B]" << std::endl;
-    PrintPartOfMatrix<float>(UMatrixHost, M, N, 8, 8);
+    PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
     CHECK_ACL(aclrtFree(AMatrixDevice));
     CHECK_ACL(aclrtFreeHost(AMatrixHost));
