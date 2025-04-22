@@ -4,5 +4,9 @@
 **/out/
 **/input/
 **/output/
-**/cmake-build-debug/
+**/cmake-build-*/
 test_bin
+trsm*
+*.md
+profing_data
+plog

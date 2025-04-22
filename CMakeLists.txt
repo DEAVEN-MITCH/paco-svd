@@ -5,6 +5,7 @@ set(SOC_VERSION $ENV{SOC_VERSION} CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH} CACHE PATH "ASCEND CANN package installation directory")
 #below is for debug
 # message("ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
+# message("CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 
 include(${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake/ascendc.cmake)
 
@@ -22,6 +23,12 @@ ascendc_compile_options(svd_kernels PRIVATE "-Wno-deprecated-declarations")
 ascendc_include_directories(svd_kernels PRIVATE ${ASCEND_CANN_PACKAGE_PATH}/include)
 
 ascendc_library(upper_bidiagonalization STATIC upper_bidiagonalization.cpp)
+# 如果CMAKE_BUILD_TYPE=Release，则不添加ASCENDC_DEBUG定义
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    ascendc_compile_definitions(upper_bidiagonalization PRIVATE -DASCENDC_DEBUG)
+endif()
+
+# ascendc_compile_definitions(upper_bidiagonalization PRIVATE -DASCENDC_DEBUG)
 ascendc_compile_options(upper_bidiagonalization PRIVATE "-Wno-deprecated-declarations")
 ascendc_include_directories(upper_bidiagonalization PRIVATE ${ASCEND_CANN_PACKAGE_PATH}/include)
 
@@ -35,4 +42,6 @@ target_link_libraries(svd_main PRIVATE
     tiling_api
     platform
     register
+    -L${ASCEND_CANN_PACKAGE_PATH}/lib64
+    -lmsprofiler
 )
