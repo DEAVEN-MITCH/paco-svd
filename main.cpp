@@ -11,8 +11,7 @@
 #define debug(x) std::cerr << #x << ": " << x << std::endl
 int main(int argc, char **argv)
 {
-    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
-    int deviceId, M, N;
+    unsigned int deviceId, M, N;
     deviceId = 0;
     std::ifstream args_file("../args.txt");
     std::string m_str, n_str;
@@ -24,6 +23,7 @@ int main(int argc, char **argv)
         std::cerr << "M must be greater than N" << std::endl;
         return 0;
     }
+    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
     int AicNum = ascendcPlatform->GetCoreNumAic();
     int AivNum = ascendcPlatform->GetCoreNumAiv();
     size_t UMatrixFileSize = M * M * sizeof(float);
