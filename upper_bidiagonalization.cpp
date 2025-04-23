@@ -5,11 +5,11 @@ constexpr uint32_t sizeOfFloat = sizeof(float);
 constexpr int32_t BUFFER_NUM = 1;
 constexpr int32_t maxL1FloatSize = 1 << (19 - 2);
 constexpr int32_t BlockSize = 32;
-constexpr int32_t CONCURRENT_COL_CNT = BlockSize / sizeOfFloat;
+constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
 constexpr int32_t SizePerOperation = 256;
 constexpr int32_t BlockNumPerOperation = SizePerOperation / BlockSize;
 // constexpr uint64_t MASK_PATTERN = 0x0101010101010101ULL;
-const AscendC::DataCopyPadExtParams<float> colPadParams = {true, 0, 7, 0.0f};
+const AscendC::DataCopyPadExtParams<float> colPadParams = {true, 0, BlockFloatCnt - 1, 0.0f};
 // #define _____PIPE_INSIDECLASS
 template <bool ifTiling = false>
 class Kernel_Golub_Kahan_Bidiagonalization
@@ -17,9 +17,9 @@ class Kernel_Golub_Kahan_Bidiagonalization
 public:
     __aicore__ inline Kernel_Golub_Kahan_Bidiagonalization() {}
 #ifdef _____PIPE_INSIDECLASS
-    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N, GM_ADDR d, GM_ADDR e)
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, const int32_t M, const int32_t N, GM_ADDR d, GM_ADDR e)
 #else
-    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N, GM_ADDR d, GM_ADDR e, AscendC::TPipe &pipe)
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, const int32_t M, const int32_t N, GM_ADDR d, GM_ADDR e, AscendC::TPipe &pipe)
 #endif
     {
         if (AscendC::GetBlockIdx() != 0)
@@ -27,7 +27,6 @@ public:
         m_ = M;
         n_ = N;
         ASSERT(M >= N && "in Init, we should have M>=N");
-        // k_ = std::min(M, N);
 
         // 设置全局内存缓冲区
         aGm.SetGlobalBuffer((__gm__ float *)a, M * N);
@@ -95,16 +94,17 @@ private:
     {
         ASSERT(i < n_ && "in ComputeColumnHouseholder, i should be less than n_");
         const uint16_t len = m_ - i;
+        const uint32_t aGmStart = i * n_ + i;
         if (len <= 1)
         {
             // a scalar vector, no need to calc,beta=0;
             tauq(i) = 0;
-            dGm(i) = aGm(i * n_ + i);
+            dGm(i) = aGm(aGmStart);
             return;
         }
-        const uint32_t ttl = len * CONCURRENT_COL_CNT, aGmStart = i * n_ + i;
-        const AscendC::DataCopyExtParams copyInExtParams = {len, 4, (n_ - 1) * sizeOfFloat, 0, 0};
-        const AscendC::DataCopyExtParams copyOutExtParams = {len, 4, 0, (n_ - 1) * sizeOfFloat, 0};
+        const uint32_t ttl = len * BlockFloatCnt;
+        const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+        const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
         auto tau = tauq[i];
         auto deGm = dGm[i];
         ComputeHouseholder(ttl, aGmStart, colPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
@@ -113,14 +113,22 @@ private:
     {
         ASSERT(i < n_ - 1 && "in ComputeRowHouseholder, i should be less than n_ - 1");
         const uint16_t len = n_ - i - 1;
-        const uint8_t padLen = len % 8 == 0 ? 0 : 8 - len % 8;
+        const uint32_t aGmStart = i * n_ + i + 1;
+        if (len <= 1)
+        {
+            // a scalar vector, no need to calc,beta=0;
+            taup(i) = 0;
+            eGm(i) = aGm(aGmStart);
+            return;
+        }
+        const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
         const uint32_t ttl = len + padLen;
         const AscendC::DataCopyPadExtParams<float> rowPadParams = {true, 0, padLen, 0.0f};
         const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
         const AscendC::DataCopyExtParams copyOutExtParams = {1, len * sizeOfFloat, 0, 0, 0};
         auto tau = taup[i];
         auto deGm = eGm[i];
-        ComputeHouseholder(ttl, i * n_ + i + 1, rowPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
+        ComputeHouseholder(ttl, aGmStart, rowPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
     }
     __aicore__ inline void ComputeHouseholder(const uint32_t ttl, const uint32_t aGmStart,
                                               const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
@@ -142,7 +150,7 @@ private:
         auto x1 = inputTensor(0);
         AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
         AscendC::Mul(houseVec, inputTensor, inputTensor, ttl);
-        AscendC::ReduceSum(inputTensor, houseVec, inputTensor[CONCURRENT_COL_CNT], ttl);
+        AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], ttl);
         auto sigma = inputTensor(0);
         inQueue.FreeTensor(inputTensor);
         if (sigma == 0)
@@ -154,6 +162,7 @@ private:
         else
         {
             auto miu = std::sqrt(x1 * x1 + sigma);
+            deGm(0) = miu;
             float v1;
             if (x1 <= 0)
             {
@@ -163,13 +172,12 @@ private:
             {
                 v1 = -sigma / (x1 + miu);
             }
-            float v1sq = v1 * v1;
+            float v1sq = v1 * v1, v1_inv = 1.0f / v1;
             tau(0) = 2 * v1sq / (sigma + v1sq);
-            AscendC::Muls(outputTensor, outputTensor, 1.0f / v1, ttl);
+            AscendC::Muls(outputTensor, outputTensor, v1_inv, ttl);
             AscendC::Adds(houseVec, outputTensor, 0.0f, ttl);
             AscendC::Duplicate(houseVec, 1.0f, 1);
             AscendC::Duplicate(outputTensor, miu, 1);
-            deGm(0) = miu;
             outQueue.EnQue(outputTensor);
 
             // Copy out
@@ -189,16 +197,16 @@ private:
         }
         for (int32_t j = i + 1; j < n_; j++)
         {
-            const AscendC::DataCopyExtParams copyInExtParams = {len, 4, (n_ - 1) * sizeOfFloat, 0, 0};
-            const AscendC::DataCopyExtParams copyOutExtParams = {len, 4, 0, (n_ - 1) * sizeOfFloat, 0};
-            ApplyTransformCore(len * CONCURRENT_COL_CNT, i * n_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, aGm);
+            const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+            const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
+            ApplyTransformCore(len * BlockFloatCnt, i * n_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, aGm);
         }
     }
     __aicore__ inline void ApplyRowTransformV2(int32_t i)
     {
         // 应用行变换到下方子矩阵
         const uint16_t len = n_ - i - 1;
-        const uint8_t padLen = len % 8 == 0 ? 0 : 8 - len % 8;
+        const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
         const uint32_t ttl = len + padLen;
         float beta = taup(i);
         if (beta == 0)
@@ -231,7 +239,7 @@ private:
         // compute
         inputTensor = inQueue.DeQue<float>();
         outputTensor = outQueue.AllocTensor<float>();
-        // row*v
+        // row*v,use row as demonstrative example
         AscendC::Mul(vectmp, inputTensor, houseVec, ttl);
         AscendC::ReduceSum(scalartmp, vectmp, outputTensor, ttl);
         // beta*row*v
@@ -284,14 +292,14 @@ private:
             }
 
             // 加载当前houseVec
-            const AscendC::DataCopyExtParams copyInExtParams = {len, 4, (n_ - 1) * sizeOfFloat, 0, 0};
-            LoadHouseVec(len * CONCURRENT_COL_CNT, i * n_ + i, colPadParams, copyInExtParams);
+            const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+            LoadHouseVec(len * BlockFloatCnt, i * n_ + i, colPadParams, copyInExtParams);
 
             for (int32_t j = i; j < m_; j++)
             {
-                const AscendC::DataCopyExtParams copyInExtParams = {len, 4, (m_ - 1) * sizeOfFloat, 0, 0};
-                const AscendC::DataCopyExtParams copyOutExtParams = {len, 4, 0, (m_ - 1) * sizeOfFloat, 0};
-                ApplyTransformCore(len * CONCURRENT_COL_CNT, i * m_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, uGm);
+                const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (m_ - 1) * sizeOfFloat, 0, 0};
+                const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (m_ - 1) * sizeOfFloat, 0};
+                ApplyTransformCore(len * BlockFloatCnt, i * m_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, uGm);
             }
         }
 
@@ -300,7 +308,7 @@ private:
         {
             // the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
             const uint16_t len = n_ - i - 1;
-            const uint8_t padLen = len % 8 == 0 ? 0 : 8 - len % 8;
+            const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
             const uint32_t ttl = len + padLen;
             auto beta = taup(i);
             if (beta == 0)
@@ -336,7 +344,6 @@ private:
 
 private:
     uint16_t m_, n_;
-    // int32_t k_;
 #ifdef _____PIPE_INSIDECLASS
     AscendC::TPipe pipe;
 #endif
@@ -346,7 +353,7 @@ private:
     AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, scalarTmp, vecTmp;
     // AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
     AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm;
-    AscendC::LocalTensor<float> col, row, houseVec, scalartmp, vectmp, taup, tauq, inputTensor, outputTensor;
+    AscendC::LocalTensor<float> houseVec, scalartmp, vectmp, taup, tauq, inputTensor, outputTensor;
 };
 
 template <>
