@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(svd)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(SOC_VERSION $ENV{SOC_VERSION} CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH} CACHE PATH "ASCEND CANN package installation directory")
 #below is for debug
@@ -30,6 +30,13 @@ endif()
 
 # ascendc_compile_definitions(upper_bidiagonalization PRIVATE -DASCENDC_DEBUG)
 ascendc_compile_options(upper_bidiagonalization PRIVATE "-Wno-deprecated-declarations")
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    string(TIMESTAMP CURRENT_TIME "%Y%m%d_%H%M%S")
+    ascendc_compile_options(upper_bidiagonalization PRIVATE -g)
+    ascendc_compile_options(upper_bidiagonalization PRIVATE --cce-auto-sync-log=cce-auto-sync-log_${CURRENT_TIME}.txt)
+endif()
+
+
 ascendc_include_directories(upper_bidiagonalization PRIVATE ${ASCEND_CANN_PACKAGE_PATH}/include)
 
 

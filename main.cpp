@@ -31,6 +31,7 @@ int main(int argc, char **argv)
     size_t VtMatrixFileSize = N * N * sizeof(float);
     size_t DArrayFileSize = N * sizeof(float);
     size_t EArrayFileSize = (N - 1) * sizeof(float);
+    
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
     size_t userWorkspaceSize = 0;
     size_t systemWorkspaceSize = ascendcPlatform->GetLibApiWorkSpaceSize();
@@ -85,7 +86,7 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&EArrayDevice, EArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (2, stream, AMatrixDevice, UMatrixDevice, VtMatrixDevice, M, N, DArrayDevice, EArrayDevice);
+    (1, stream, AMatrixDevice, UMatrixDevice, VtMatrixDevice, M, N, DArrayDevice, EArrayDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
     std::cout << "finish" << std::endl;
