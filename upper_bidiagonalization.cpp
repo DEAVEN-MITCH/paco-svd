@@ -38,27 +38,19 @@ public:
         initUV();
 
         // 初始化管道缓冲区
-        // pipe.InitBuffer(colQueue, BUFFER_NUM, M * BlockSize + SizePerOperation);
-        // pipe.InitBuffer(rowQueue, BUFFER_NUM, N * sizeOfFloat);
-        // pipe.InitBuffer(outQueue, BUFFER_NUM, M * BlockSize + SizePerOperation);
         pipe.InitBuffer(inQueue, BUFFER_NUM, M * BlockSize);
         pipe.InitBuffer(outQueue, BUFFER_NUM, M * BlockSize);
-        pipe.InitBuffer(d_, N * sizeOfFloat);
-        pipe.InitBuffer(e_, (N - 1) * sizeOfFloat);
-        pipe.InitBuffer(tauq_, N * sizeOfFloat);
-        pipe.InitBuffer(taup_, (N - 1) * sizeOfFloat);
-        pipe.InitBuffer(householder_vec, M * BlockSize);
-        pipe.InitBuffer(scalarTmp, sizeOfFloat);
-        pipe.InitBuffer(vecTmp, M * BlockSize);
-        // pipe.InitBuffer(householder_vec, M * BlockSize + SizePerOperation); // an additional SizePerOperation in case tail masked operation exceeds the address boundary
-        // reduce sum need at most M
-        // pipe.InitBuffer(worktmp, M * BlockSize + SizePerOperation);
+        pipe.InitBuffer(tauqBuf, N * sizeOfFloat);
+        pipe.InitBuffer(taupBuf, (N - 1) * sizeOfFloat);
+        pipe.InitBuffer(houseVecBuf, M * BlockSize);
+        pipe.InitBuffer(scalarBuf, sizeOfFloat);
+        pipe.InitBuffer(workLocalBuf, M * BlockSize);
 
-        houseVec = householder_vec.Get<float>();
-        scalartmp = scalarTmp.Get<float>();
-        vectmp = vecTmp.Get<float>();
-        taup = taup_.Get<float>();
-        tauq = tauq_.Get<float>();
+        houseVec = houseVecBuf.Get<float>();
+        scalar = scalarBuf.Get<float>();
+        workLocal = workLocalBuf.Get<float>();
+        taup = taupBuf.Get<float>();
+        tauq = tauqBuf.Get<float>();
     }
     __aicore__ inline void Process()
     {
@@ -130,6 +122,7 @@ private:
         auto deGm = eGm[i];
         ComputeHouseholder(ttl, aGmStart, rowPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
     }
+
     __aicore__ inline void ComputeHouseholder(const uint32_t ttl, const uint32_t aGmStart,
                                               const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
                                               const AscendC::DataCopyExtParams &copyInExtParams,
@@ -142,7 +135,7 @@ private:
         AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
         inQueue.EnQue(inputTensor);
 
-        // Vector Compute
+        // Compute
         inputTensor = inQueue.DeQue<float>();
         outputTensor = outQueue.AllocTensor<float>();
         // copy inputTensor to outputTensor
@@ -186,6 +179,7 @@ private:
             outQueue.FreeTensor(outputTensor);
         }
     }
+
     __aicore__ inline void ApplyColumnTransformV2(int32_t i)
     {
         // 应用列变换到右侧子矩阵
@@ -240,16 +234,14 @@ private:
         inputTensor = inQueue.DeQue<float>();
         outputTensor = outQueue.AllocTensor<float>();
         // row*v,use row as demonstrative example
-        AscendC::Mul(vectmp, inputTensor, houseVec, ttl);
-        AscendC::ReduceSum(scalartmp, vectmp, outputTensor, ttl);
+        AscendC::Mul(outputTensor, inputTensor, houseVec, ttl);
+        AscendC::ReduceSum(scalar, outputTensor, workLocal, ttl);
         // beta*row*v
-        // float coeff = scalartmp(0);
-        // coeff *= beta;
-        AscendC::Muls(scalartmp, scalartmp, beta, 1);
-        float coeff = scalartmp(0);
-        AscendC::Muls(vectmp, houseVec, coeff, ttl);
+        AscendC::Muls(scalar, scalar, beta, 1);
+        float coeff = scalar(0);
+        AscendC::Muls(outputTensor, houseVec, coeff, ttl);
         // row - beta*row*v*vT
-        AscendC::Sub(outputTensor, inputTensor, vectmp, ttl);
+        AscendC::Sub(outputTensor, inputTensor, outputTensor, ttl);
 
         inQueue.FreeTensor(inputTensor);
         outQueue.EnQue(outputTensor);
@@ -259,6 +251,7 @@ private:
         AscendC::DataCopyPad(targetGm[targetGmStart], outputTensor, copyOutExtParams);
         outQueue.FreeTensor(outputTensor);
     }
+
     __aicore__ inline void LoadHouseVec(
         const uint32_t ttl,
         const uint32_t aGmStart,
@@ -349,11 +342,9 @@ private:
 #endif
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-    // AscendC::TBuf<AscendC::TPosition::VECCALC> colBuf, rowBuf, outBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> d_, e_, tauq_, taup_, householder_vec, scalarTmp, vecTmp;
-    // AscendC::TBuf<AscendC::TPosition::VECCALC> worktmp;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tauqBuf, taupBuf, houseVecBuf, scalarBuf, workLocalBuf;
     AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm;
-    AscendC::LocalTensor<float> houseVec, scalartmp, vectmp, taup, tauq, inputTensor, outputTensor;
+    AscendC::LocalTensor<float> houseVec, scalar, workLocal, taup, tauq, inputTensor, outputTensor;
 };
 
 template <>
