@@ -11,15 +11,24 @@ constexpr int32_t BlockNumPerOperation = SizePerOperation / BlockSize;
 // constexpr uint64_t MASK_PATTERN = 0x0101010101010101ULL;
 const AscendC::DataCopyPadExtParams<float> colPadParams = {true, 0, BlockFloatCnt - 1, 0.0f};
 // #define _____PIPE_INSIDECLASS
+template <class T>
+__aicore__ inline constexpr T RoundUpDiv(T x, T div)
+{
+    return (x + div - 1) / div;
+}
+__aicore__ inline constexpr int32_t notTilingKGKBSize(int32_t M, int32_t N)
+{
+    return 3 * M * BlockSize + BlockSize + RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockFloatCnt;
+}
 template <bool ifTiling = false>
 class Kernel_Golub_Kahan_Bidiagonalization
 {
 public:
     __aicore__ inline Kernel_Golub_Kahan_Bidiagonalization() {}
 #ifdef _____PIPE_INSIDECLASS
-    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, const int32_t M, const int32_t N, GM_ADDR d, GM_ADDR e)
+    __aicore__ inline void Init(const int32_t M, const int32_t N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup)
 #else
-    __aicore__ inline void Init(GM_ADDR a, GM_ADDR u, GM_ADDR vt, const int32_t M, const int32_t N, GM_ADDR d, GM_ADDR e, AscendC::TPipe &pipe)
+    __aicore__ inline void Init(const int32_t M, const int32_t N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, AscendC::TPipe &pipe)
 #endif
     {
         if (AscendC::GetBlockIdx() != 0)
@@ -34,23 +43,21 @@ public:
         vtGm.SetGlobalBuffer((__gm__ float *)vt, N * N);
         dGm.SetGlobalBuffer((__gm__ float *)d, N);
         eGm.SetGlobalBuffer((__gm__ float *)e, N - 1);
+        tauqGm.SetGlobalBuffer((__gm__ float *)tauq, N);
+        taupGm.SetGlobalBuffer((__gm__ float *)taup, N - 1);
 
         initUV();
 
         // 初始化管道缓冲区
         pipe.InitBuffer(inQueue, BUFFER_NUM, M * BlockSize);
         pipe.InitBuffer(outQueue, BUFFER_NUM, M * BlockSize);
-        pipe.InitBuffer(tauqBuf, N * sizeOfFloat);
-        pipe.InitBuffer(taupBuf, (N - 1) * sizeOfFloat);
         pipe.InitBuffer(houseVecBuf, M * BlockSize);
         pipe.InitBuffer(scalarBuf, sizeOfFloat);
-        pipe.InitBuffer(workLocalBuf, M * BlockSize);
+        pipe.InitBuffer(workLocalBuf, RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockFloatCnt);
 
         houseVec = houseVecBuf.Get<float>();
         scalar = scalarBuf.Get<float>();
         workLocal = workLocalBuf.Get<float>();
-        taup = taupBuf.Get<float>();
-        tauq = tauqBuf.Get<float>();
     }
     __aicore__ inline void Process()
     {
@@ -90,14 +97,14 @@ private:
         if (len <= 1)
         {
             // a scalar vector, no need to calc,beta=0;
-            tauq(i) = 0;
+            tauqGm(i) = 0;
             dGm(i) = aGm(aGmStart);
             return;
         }
         const uint32_t ttl = len * BlockFloatCnt;
         const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
         const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
-        auto tau = tauq[i];
+        auto tau = tauqGm[i];
         auto deGm = dGm[i];
         ComputeHouseholder(ttl, aGmStart, colPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
     }
@@ -109,7 +116,7 @@ private:
         if (len <= 1)
         {
             // a scalar vector, no need to calc,beta=0;
-            taup(i) = 0;
+            taupGm(i) = 0;
             eGm(i) = aGm(aGmStart);
             return;
         }
@@ -118,7 +125,7 @@ private:
         const AscendC::DataCopyPadExtParams<float> rowPadParams = {true, 0, padLen, 0.0f};
         const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
         const AscendC::DataCopyExtParams copyOutExtParams = {1, len * sizeOfFloat, 0, 0, 0};
-        auto tau = taup[i];
+        auto tau = taupGm[i];
         auto deGm = eGm[i];
         ComputeHouseholder(ttl, aGmStart, rowPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
     }
@@ -127,7 +134,7 @@ private:
                                               const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
                                               const AscendC::DataCopyExtParams &copyInExtParams,
                                               const AscendC::DataCopyExtParams &copyOutExtParams,
-                                              AscendC::LocalTensor<float> &tau,
+                                              AscendC::GlobalTensor<float> &tau,
                                               AscendC::GlobalTensor<float> &deGm)
     {
         // Copy in
@@ -184,7 +191,7 @@ private:
     {
         // 应用列变换到右侧子矩阵
         const uint16_t len = m_ - i;
-        float beta = tauq(i);
+        float beta = tauqGm(i);
         if (beta == 0)
         {
             return;
@@ -202,7 +209,7 @@ private:
         const uint16_t len = n_ - i - 1;
         const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
         const uint32_t ttl = len + padLen;
-        float beta = taup(i);
+        float beta = taupGm(i);
         if (beta == 0)
         {
             return;
@@ -278,7 +285,7 @@ private:
         {
             // the i-th householder vector updates m_-i columns of U
             const uint16_t len = m_ - i;
-            auto beta = tauq(i);
+            auto beta = tauqGm(i);
             if (beta == 0)
             {
                 continue;
@@ -303,7 +310,7 @@ private:
             const uint16_t len = n_ - i - 1;
             const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
             const uint32_t ttl = len + padLen;
-            auto beta = taup(i);
+            auto beta = taupGm(i);
             if (beta == 0)
             {
                 continue;
@@ -342,25 +349,40 @@ private:
 #endif
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tauqBuf, taupBuf, houseVecBuf, scalarBuf, workLocalBuf;
-    AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm;
-    AscendC::LocalTensor<float> houseVec, scalar, workLocal, taup, tauq, inputTensor, outputTensor;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> houseVecBuf, scalarBuf, workLocalBuf;
+    AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm, tauqGm, taupGm;
+    AscendC::LocalTensor<float> houseVec, scalar, workLocal, inputTensor, outputTensor;
 };
 
 template <>
 class Kernel_Golub_Kahan_Bidiagonalization<true>
 {
 };
-extern "C" __global__ __aicore__ void upper_bidiagonalization(GM_ADDR a, GM_ADDR u, GM_ADDR vt, int M, int N, GM_ADDR d, GM_ADDR e)
+extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup)
 {
 #ifndef _____PIPE_INSIDECLASS
     AscendC::TPipe pipe;
     auto blockNum = AscendC::GetBlockNum();
-    Kernel_Golub_Kahan_Bidiagonalization kernel;
-    kernel.Init(a, u, vt, M, N, d, e, pipe);
+    if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
+    {
+        AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
+        Kernel_Golub_Kahan_Bidiagonalization kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, pipe);
 #else
     Kernel_Golub_Kahan_Bidiagonalization kernel;
-    kernel.Init(a, u, vt, M, N, d, e);
+    kernel.Init(M, N, a, u, vt, d, e, tauq, taup);
 #endif
-    kernel.Process();
+        kernel.Process();
+    }
+    else
+    {
+#ifndef _____PIPE_INSIDECLASS
+        // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+        // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, pipe);
+#else
+    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup);
+#endif
+        // kernel.Process();
+    }
 }
