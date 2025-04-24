@@ -29,7 +29,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # ascendc_compile_definitions(upper_bidiagonalization PRIVATE -DASCENDC_DEBUG)
-ascendc_compile_options(upper_bidiagonalization PRIVATE "-Wno-deprecated-declarations")
+ascendc_compile_options(upper_bidiagonalization PRIVATE "-Wno-deprecated-declarations" -DHAVE_WORKSPACE)
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     string(TIMESTAMP CURRENT_TIME "%Y%m%d_%H%M%S")
     ascendc_compile_options(upper_bidiagonalization PRIVATE -g)
