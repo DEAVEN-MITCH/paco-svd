@@ -22,7 +22,7 @@ __aicore__ inline constexpr int32_t notTilingKGKBSize(int32_t M, int32_t N)
 }
 __aicore__ inline constexpr int32_t getQueueM()
 {
-    return static_cast<int32_t>(((192 << 10) - 41 * 32) / ((1 + 2 * BUFFER_NUM) * 32 + .5));
+    return static_cast<int32_t>(((192 << 10) - 41 * 32) / ((1 + 2 * BUFFER_NUM) * 32 + .5f));
 }
 constexpr int32_t FixedBufferSize = getQueueM() * BlockSize;
 template <bool ifTiling = false>
@@ -136,7 +136,7 @@ private:
         auto deGm = dGm[i];
         if constexpr (ifTiling)
         {
-            ComputeHouseholderTiling<true>(ttl, aGmStart, colPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
+            ComputeHouseholderTiling<true>(ttl, aGmStart, len, colPadParams, tau, deGm);
         }
         else
         {
@@ -166,7 +166,7 @@ private:
         auto deGm = eGm[i];
         if constexpr (ifTiling)
         {
-            ComputeHouseholderTiling<false>(ttl, aGmStart, rowPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
+            ComputeHouseholderTiling<false>(ttl, aGmStart, len, rowPadParams, tau, deGm);
         }
         else
         {
@@ -183,7 +183,7 @@ private:
                                               AscendC::GlobalTensor<float> &tau,
                                               AscendC::GlobalTensor<float> &deGm)
     {
-        auto x1 = aGm[aGmStart];
+        auto x1 = aGm(aGmStart);
         float sigma;
         outputTensor = outQueue.AllocTensor<float>();
         ComputeSigma<true, true, true>(ttl, aGmStart, copyInPadParams, copyInExtParams, sigma);
@@ -213,22 +213,12 @@ private:
     }
 
     template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
-    __aicore__ inline void ComputeSigma(const uint32_t ttl, const uint32_t aGmStart,
+    __aicore__ inline void ComputeSigma(const uint16_t ttl, const uint32_t aGmStart,
                                         const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
                                         const AscendC::DataCopyExtParams &copyInExtParams,
                                         float &sigma)
     {
-        inputTensor = inQueue.AllocTensor<float>();
-        if constexpr (isColumn || isTailLoop)
-        {
-            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
-        }
-        else
-        {
-            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, {});
-        }
-
-        inQueue.EnQue(inputTensor);
+        LdVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, aGmStart, aGm, copyInPadParams, copyInExtParams);
 
         // Compute
         inputTensor = inQueue.DeQue<float>();
@@ -251,27 +241,17 @@ private:
         inQueue.FreeTensor(inputTensor);
     }
     template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
-    __aicore__ inline void ComputeHouseVec(const uint32_t ttl,
+    __aicore__ inline void ComputeHouseVec(const uint16_t ttl,
                                            const uint32_t aGmStart,
                                            const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
-                                           AscendC::DataCopyExtParams &copyInExtParams,
-                                           AscendC::DataCopyExtParams &copyOutExtParams,
+                                           const AscendC::DataCopyExtParams &copyInExtParams,
+                                           const AscendC::DataCopyExtParams &copyOutExtParams,
                                            const float v1_inv,
                                            const float miu)
     {
         if constexpr (!isFirstLoop)
         {
-            // 分配输入张量
-            inputTensor = inQueue.AllocTensor<float>();
-            if constexpr (isColumn || isTailLoop)
-            {
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
-            }
-            else
-            {
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, {});
-            }
-            inQueue.EnQue(inputTensor);
+            LdVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, aGmStart, aGm, copyInPadParams, copyInExtParams);
             // 计算
             inputTensor = inQueue.DeQue<float>();
             outputTensor = outQueue.AllocTensor<float>();
@@ -296,7 +276,7 @@ private:
 
     template <bool isColumn>
     __aicore__ inline void ComputeHouseholderTiling(const uint32_t ttl, const uint32_t aGmStart,
-                                                    const uint32_t effectiveLen,
+                                                    const uint16_t effectiveLen,
                                                     const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
                                                     AscendC::GlobalTensor<float> &tau,
                                                     AscendC::GlobalTensor<float> &deGm)
@@ -311,21 +291,21 @@ private:
             // construct the copyInExtParams and copyOutExtParams,then forward to ComputeHouseholder
             if constexpr (isColumn)
             {
-                const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
-                const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
+                const AscendC::DataCopyExtParams copyInExtParams = {effectiveLen, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+                const AscendC::DataCopyExtParams copyOutExtParams = {effectiveLen, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
                 ComputeHouseholder(ttl, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
             }
             else
             {
-                const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
-                const AscendC::DataCopyExtParams copyOutExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                const AscendC::DataCopyExtParams copyInExtParams = {1, effectiveLen * sizeOfFloat, 0, 0, 0};
+                const AscendC::DataCopyExtParams copyOutExtParams = {1, effectiveLen * sizeOfFloat, 0, 0, 0};
                 ComputeHouseholder(ttl, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, tau, deGm);
             }
             return;
         }
         // more than one loop
         AscendC::DataCopyExtParams copyInExtParams, copyOutExtParams;
-        float x1 = aGm[aGmStart], sigma;
+        float x1 = aGm(aGmStart), sigma;
         // Compute sigma first
         outputTensor = outQueue.AllocTensor<float>();
         // the frist loop
@@ -337,6 +317,10 @@ private:
             copyInExtParams.blockLen = sizeOfFloat;
             copyInExtParams.srcStride = (n_ - 1) * sizeOfFloat;
             copyInExtParams.dstStride = 0;
+            copyOutExtParams.blockCount = getQueueM();
+            copyOutExtParams.blockLen = sizeOfFloat;
+            copyOutExtParams.srcStride = 0;
+            copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
             subTtl = getQueueM();
             aGmStartStridePerFormerLoop = getQueueM() * n_;
             tailTtl = tailBytes / BlockSize;
@@ -347,6 +331,10 @@ private:
             copyInExtParams.blockLen = FixedBufferSize;
             copyInExtParams.srcStride = 0;
             copyInExtParams.dstStride = 0;
+            copyOutExtParams.blockCount = 1;
+            copyOutExtParams.blockLen = FixedBufferSize;
+            copyOutExtParams.srcStride = 0;
+            copyOutExtParams.dstStride = 0;
             subTtl = FixedBufferSize / sizeOfFloat;
             aGmStartStridePerFormerLoop = subTtl;
             tailTtl = tailBytes / sizeOfFloat;
@@ -396,18 +384,12 @@ private:
             tau(0) = 2 * v1sq / (sigma + v1sq);
             if constexpr (isColumn)
             {
-                copyOutExtParams.blockCount = getQueueM();
-                copyOutExtParams.blockLen = sizeOfFloat;
-                copyOutExtParams.srcStride = 0;
-                copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
+
                 copyInExtParams.blockCount = getQueueM();
             }
             else
             {
-                copyOutExtParams.blockCount = 1;
-                copyOutExtParams.blockLen = FixedBufferSize;
-                copyOutExtParams.srcStride = 0;
-                copyOutExtParams.dstStride = 0;
+
                 copyInExtParams.blockLen = FixedBufferSize;
             }
             ComputeHouseVec<isColumn, true>(subTtl, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
@@ -458,9 +440,26 @@ private:
         }
         else
         {
-            for (int32_t j = jFirst; j < n_; j += aivNum)
+            const int tailBytes = ttl * sizeOfFloat % FixedBufferSize;
+            const int formerLoopNum = ttl * sizeOfFloat / FixedBufferSize;
+            const bool onlyOneLoop = formerLoopNum == 0;
+            if (onlyOneLoop)
             {
-                LoadHouseVecAndApplyTransformCoreTiling(ttl, i * n_ + j, colPadParams, copyInExtParams, copyInExtParams, copyOutExtParams, beta, aGm);
+                // 加载当前houseVec
+                const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+                const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (n_ - 1) * sizeOfFloat, 0};
+                LoadHouseVec(ttl, i * n_ + i, colPadParams, copyInExtParams);
+                for (int32_t j = jFirst; j < n_; j += aivNum)
+                {
+                    ApplyTransformCore(ttl, i * n_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, aGm);
+                }
+            }
+            else
+            {
+                for (int32_t j = jFirst; j < n_; j += aivNum)
+                {
+                    LoadHouseVecAndApplyTransformCoreTiling<true>(ttl, len, i * n_ + j, i * n_ + i, colPadParams, beta, aGm, tailBytes, formerLoopNum, n_);
+                }
             }
         }
     }
@@ -493,9 +492,26 @@ private:
         }
         else
         {
-            for (int32_t j = jFirst; j < m_; j += aivNum)
+            const int tailBytes = ttl * sizeOfFloat % FixedBufferSize;
+            const int formerLoopNum = ttl * sizeOfFloat / FixedBufferSize;
+            const bool onlyOneLoop = formerLoopNum == 0;
+            if (onlyOneLoop)
             {
-                LoadHouseVecAndApplyTransformCoreTiling(ttl, j * n_ + i + 1, rowPadParams, copyInExtParams, copyInExtParams, copyOutExtParams, beta, aGm);
+                // 加载当前houseVec
+                const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                const AscendC::DataCopyExtParams copyOutExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                LoadHouseVec(ttl, i * n_ + i + 1, rowPadParams, copyInExtParams);
+                for (int32_t j = jFirst; j < m_; j += aivNum)
+                {
+                    ApplyTransformCore(ttl, j * n_ + i + 1, rowPadParams, copyInExtParams, copyOutExtParams, beta, aGm);
+                }
+            }
+            else
+            {
+                for (int32_t j = jFirst; j < m_; j += aivNum)
+                {
+                    LoadHouseVecAndApplyTransformCoreTiling<false>(ttl, len, j * n_ + i + 1, i * n_ + i + 1, rowPadParams, beta, aGm, tailBytes, formerLoopNum, n_);
+                }
             }
         }
     }
@@ -535,42 +551,193 @@ private:
         AscendC::DataCopyPad(targetGm[targetGmStart], outputTensor, copyOutExtParams);
         outQueue.FreeTensor(outputTensor);
     }
-
-    __aicore__ inline void LoadHouseVecAndApplyTransformCoreTiling(
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void LdVecTiling(
         const uint32_t ttl,
         const uint32_t targetGmStart,
+        AscendC::GlobalTensor<float> &targetGm,
         const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
-        const AscendC::DataCopyExtParams &copyInHouseVecExtParams,
-        const AscendC::DataCopyExtParams &copyInExtParams,
-        const AscendC::DataCopyExtParams &copyOutExtParams,
-        const float beta,
-        AscendC::GlobalTensor<float> &targetGm)
+        const AscendC::DataCopyExtParams &copyInExtParams)
+    {
+        inputTensor = inQueue.AllocTensor<float>();
+        if constexpr (isColumn || isTailLoop)
+        {
+            AscendC::DataCopyPad(inputTensor, targetGm[targetGmStart], copyInExtParams, copyInPadParams);
+        }
+        else
+        {
+            AscendC::DataCopyPad(inputTensor, targetGm[targetGmStart], copyInExtParams, {});
+        }
+
+        inQueue.EnQue(inputTensor);
+    }
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void LdHouseVecTiling(
+        const uint32_t ttl,
+        const uint32_t aGmStart,
+        const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+        const AscendC::DataCopyExtParams &copyInExtParams)
     {
         // copy in
-        inputTensor = inQueue.AllocTensor<float>();
-        AscendC::DataCopyPad(inputTensor, targetGm[targetGmStart], copyInExtParams, copyInPadParams);
-        inQueue.EnQue(inputTensor);
+        LdVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, aGmStart, aGm, copyInPadParams, copyInExtParams);
 
         // compute
         inputTensor = inQueue.DeQue<float>();
-        outputTensor = outQueue.AllocTensor<float>();
-        // row*v,use row as demonstrative example
+        AscendC::DataCopy(houseVec, inputTensor, ttl);
+        if constexpr (isFirstLoop)
+        {
+            AscendC::Duplicate(houseVec, 1.0f, 1);
+        }
+        inQueue.FreeTensor(inputTensor);
+    }
+
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void CalculateCoeffTiling(
+        const uint32_t ttl,
+        const uint32_t targetGmStart,
+        const uint32_t aGmStart,
+        const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+        const AscendC::DataCopyExtParams &copyInParams,
+        const AscendC::DataCopyExtParams &copyInHouseVecParams,
+        AscendC::GlobalTensor<float> &targetGm,
+        float &coeff)
+    {
+        LdHouseVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, aGmStart, copyInPadParams, copyInHouseVecParams);
+        LdVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, targetGmStart, targetGm, copyInPadParams, copyInParams);
+        inputTensor = inQueue.DeQue<float>();
         AscendC::Mul(outputTensor, inputTensor, houseVec, ttl);
         AscendC::ReduceSum(scalar, outputTensor, workLocal, ttl);
-        // beta*row*v
-        AscendC::Muls(scalar, scalar, beta, 1);
-        float coeff = scalar(0);
+        coeff += scalar(0);
+        inQueue.FreeTensor(inputTensor);
+    }
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void ApplyTransformStage2(
+        const uint32_t ttl,
+        const uint32_t targetGmStart,
+        const uint32_t aGmStart,
+        const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+        const AscendC::DataCopyExtParams &copyInParams,
+        const AscendC::DataCopyExtParams &copyInHouseVecParams,
+        const AscendC::DataCopyExtParams &copyOutExtParams,
+        AscendC::GlobalTensor<float> &targetGm,
+        const float &coeff)
+    {
+        LdHouseVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, aGmStart, copyInPadParams, copyInHouseVecParams);
+        LdVecTiling<isColumn, isFirstLoop, isTailLoop>(ttl, targetGmStart, targetGm, copyInPadParams, copyInParams);
+        inputTensor = inQueue.DeQue<float>();
+        if constexpr (!isFirstLoop)
+        {
+            outputTensor = outQueue.AllocTensor<float>();
+        }
         AscendC::Muls(outputTensor, houseVec, coeff, ttl);
-        // row - beta*row*v*vT
         AscendC::Sub(outputTensor, inputTensor, outputTensor, ttl);
-
         inQueue.FreeTensor(inputTensor);
         outQueue.EnQue(outputTensor);
 
-        // copy out
         outputTensor = outQueue.DeQue<float>();
         AscendC::DataCopyPad(targetGm[targetGmStart], outputTensor, copyOutExtParams);
         outQueue.FreeTensor(outputTensor);
+    }
+    template <bool isColumn>
+    __aicore__ inline void LoadHouseVecAndApplyTransformCoreTiling(
+        const uint16_t ttl,
+        const uint32_t effectiveLen,
+        const uint32_t targetGmStart,
+        const uint32_t aGmStart,
+        const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+        const float beta,
+        AscendC::GlobalTensor<float> &targetGm,
+        const uint32_t tailBytes,
+        const uint32_t formerLoopNum,
+        const uint16_t targetLDN)
+    {
+        AscendC::DataCopyExtParams copyInHouseVecExtParams;
+        AscendC::DataCopyExtParams copyInExtParams;
+        AscendC::DataCopyExtParams copyOutExtParams;
+
+        // 初始化参数
+        uint16_t subTtl;
+        uint32_t aGmStartStridePerFormerLoop, tailTtl, targetGmStartStridePerFormerLoop;
+        if constexpr (isColumn)
+        {
+            subTtl = getQueueM();
+            aGmStartStridePerFormerLoop = getQueueM() * n_;
+            targetGmStartStridePerFormerLoop = getQueueM() * targetLDN;
+            tailTtl = tailBytes / BlockSize;
+            copyInHouseVecExtParams = {subTtl, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+            copyInExtParams = {subTtl, sizeOfFloat, (targetLDN - 1) * sizeOfFloat, 0, 0};
+            copyOutExtParams = {subTtl, sizeOfFloat, 0, (targetLDN - 1) * sizeOfFloat, 0};
+        }
+        else
+        {
+            subTtl = FixedBufferSize / sizeOfFloat;
+            aGmStartStridePerFormerLoop = subTtl;
+            targetGmStartStridePerFormerLoop = subTtl;
+            tailTtl = tailBytes / sizeOfFloat;
+            copyInHouseVecExtParams = {1, FixedBufferSize, 0, 0, 0};
+            copyInExtParams = {1, FixedBufferSize, 0, 0, 0};
+            copyOutExtParams = {1, FixedBufferSize, 0, 0, 0};
+        }
+        outputTensor = outQueue.AllocTensor<float>();
+
+        float coeff = 0.0f;
+        // first calculate beta*row*v
+        // first loop
+        CalculateCoeffTiling<isColumn, true>(subTtl, targetGmStart, aGmStart, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, targetGm, coeff);
+        // formerLoopNum - 1
+        for (int32_t i = 1; i < formerLoopNum; i++)
+        {
+            CalculateCoeffTiling<isColumn, false>(subTtl, targetGmStart + i * targetGmStartStridePerFormerLoop, aGmStart + i * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, targetGm, coeff);
+        }
+        if (tailBytes > 0)
+        {
+            if constexpr (isColumn)
+            {
+                copyInExtParams.blockCount = tailTtl;
+                copyInHouseVecExtParams.blockCount = tailTtl;
+            }
+            else
+            {
+                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyInHouseVecExtParams.blockLen = tailTtl + effectiveLen - ttl;
+            }
+            CalculateCoeffTiling<isColumn, false, true>(tailTtl, targetGmStart + formerLoopNum * targetGmStartStridePerFormerLoop, aGmStart + formerLoopNum * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, targetGm, coeff);
+        }
+        coeff *= beta;
+        // then calculate row - beta*row*v*vT
+        if constexpr (isColumn)
+        {
+            copyInExtParams.blockCount = getQueueM();
+            copyInHouseVecExtParams.blockCount = getQueueM();
+        }
+        else
+        {
+            copyInExtParams.blockLen = FixedBufferSize;
+            copyInHouseVecExtParams.blockLen = FixedBufferSize;
+        }
+        // first loop
+        ApplyTransformStage2<isColumn, true>(subTtl, targetGmStart, aGmStart, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, copyOutExtParams, targetGm, coeff);
+        // formerLoopNum-1 loop
+        for (int32_t i = 1; i < formerLoopNum; ++i)
+        {
+            ApplyTransformStage2<isColumn, false>(subTtl, targetGmStart + i * targetGmStartStridePerFormerLoop, aGmStart + i * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, copyOutExtParams, targetGm, coeff);
+        }
+        if (tailBytes > 0)
+        {
+            if constexpr (isColumn)
+            {
+                copyInExtParams.blockCount = tailTtl;
+                copyInHouseVecExtParams.blockCount = tailTtl;
+                copyOutExtParams.blockCount = tailTtl;
+            }
+            else
+            {
+                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyInHouseVecExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyOutExtParams.blockLen = tailTtl + effectiveLen - ttl;
+            }
+            ApplyTransformStage2<isColumn, false, true>(tailTtl, targetGmStart + formerLoopNum * targetGmStartStridePerFormerLoop, aGmStart + formerLoopNum * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, copyOutExtParams, targetGm, coeff);
+        }
     }
 
     __aicore__ inline void LoadHouseVec(
@@ -624,31 +791,67 @@ private:
                 }
                 else
                 {
-                    for (int32_t j = jFirst; j < m_; j += aivNum)
+                    const int tailBytes = ttl * sizeOfFloat % FixedBufferSize;
+                    const int formerLoopNum = ttl * sizeOfFloat / FixedBufferSize;
+                    if (formerLoopNum == 0)
                     {
-                        LoadHouseVecAndApplyTransformCoreTiling(ttl, i * m_ + j, colPadParams, copyInExtParams, copyInExtParams, copyOutExtParams, beta, uGm);
+                        // 加载当前houseVec
+                        const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+                        LoadHouseVec(ttl, i * n_ + i, colPadParams, copyInExtParams);
+
+                        for (int32_t j = jFirst; j < m_; j += aivNum)
+                        {
+                            const AscendC::DataCopyExtParams copyInExtParams = {len, sizeOfFloat, (m_ - 1) * sizeOfFloat, 0, 0};
+                            const AscendC::DataCopyExtParams copyOutExtParams = {len, sizeOfFloat, 0, (m_ - 1) * sizeOfFloat, 0};
+                            ApplyTransformCore(ttl, i * m_ + j, colPadParams, copyInExtParams, copyOutExtParams, beta, uGm);
+                        }
+                    }
+                    else
+                    {
+                        for (int32_t j = jFirst; j < m_; j += aivNum)
+                        {
+                            LoadHouseVecAndApplyTransformCoreTiling<true>(ttl, len, i * m_ + j, i * n_ + i, colPadParams, beta, uGm, tailBytes, formerLoopNum, m_);
+                        }
                     }
                 }
                 AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
+        }
 
-            // get Vt
-            for (int32_t i = n_ - 2; i >= 0; i--)
+        // get Vt
+        for (int32_t i = n_ - 2; i >= 0; i--)
+        {
+            // the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
+            const uint16_t len = n_ - i - 1;
+            const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
+            const uint32_t ttl = len + padLen;
+            auto beta = taupGm(i);
+            if (beta == 0)
             {
-                // the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
-                const uint16_t len = n_ - i - 1;
-                const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
-                const uint32_t ttl = len + padLen;
-                auto beta = taupGm(i);
-                if (beta == 0)
+                continue;
+            }
+            const auto jFirst = GetJFirst(i);
+            if (jFirst < n_)
+            {
+                AscendC::DataCopyPadExtParams<float> rowPadParams = {true, 0, padLen, 0.0f};
+                if constexpr (!ifTiling)
                 {
-                    continue;
+                    // 加载当前houseVec
+                    const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                    LoadHouseVec(ttl, i * n_ + i + 1, rowPadParams, copyInExtParams);
+
+                    for (int32_t j = jFirst; j < n_; j += aivNum)
+                    {
+                        const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                        const AscendC::DataCopyExtParams copyOutExtParams = {1, len * sizeOfFloat, 0, 0, 0};
+                        ApplyTransformCore(ttl, j * n_ + i + 1, rowPadParams, copyInExtParams, copyOutExtParams, beta, vtGm);
+                    }
                 }
-                const auto jFirst = GetJFirst(i);
-                if (jFirst < n_)
+                else
                 {
-                    AscendC::DataCopyPadExtParams<float> rowPadParams = {true, 0, padLen, 0.0f};
-                    if constexpr (!ifTiling)
+                    const int tailBytes = ttl * sizeOfFloat % FixedBufferSize;
+                    const int formerLoopNum = ttl * sizeOfFloat / FixedBufferSize;
+                    if (formerLoopNum == 0)
                     {
                         // 加载当前houseVec
                         const AscendC::DataCopyExtParams copyInExtParams = {1, len * sizeOfFloat, 0, 0, 0};
@@ -665,76 +868,77 @@ private:
                     {
                         for (int32_t j = jFirst; j < n_; j += aivNum)
                         {
-                            LoadHouseVecAndApplyTransformCoreTiling(ttl, j * n_ + i + 1, rowPadParams, copyInExtParams, copyInExtParams, copyOutExtParams, beta, vtGm);
+                            LoadHouseVecAndApplyTransformCoreTiling<false>(ttl, len, j * n_ + i + 1, i * n_ + i + 1, rowPadParams, beta, vtGm, tailBytes, formerLoopNum, n_);
                         }
                     }
                 }
                 AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
         }
-        __aicore__ inline void initUV()
-        {
-            // cache 问题，AIV处理前需刷新Cache
-            for (int32_t i = aivIdx; i < m_; i += aivNum)
-            {
-                uGm(i * m_ + i) = 1.0f;
-            }
-            for (int32_t i = aivIdx; i < n_; i += aivNum)
-            {
-                vtGm(i * n_ + i) = 1.0f;
-            }
-        }
-
-    private:
-        __aicore__ inline uint16_t GetJFirst(const uint16_t allJStart)
-        {
-            const auto j_floor = allJStart / aivNum * aivNum;
-            const auto jFirst = j_floor + aivIdx < allJStart ? j_floor + aivIdx + aivNum : j_floor + aivIdx;
-            return jFirst;
-        }
-
-    private:
-        uint16_t m_, n_;
-        const uint8_t aivNum, aivIdx;
-#ifdef _____PIPE_INSIDECLASS
-        AscendC::TPipe pipe;
-#endif
-        AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
-        AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-        AscendC::TBuf<AscendC::TPosition::VECCALC> houseVecBuf, scalarBuf, workLocalBuf, ubWorkspaceBuf;
-        AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm, tauqGm, taupGm;
-        AscendC::GlobalTensor<int32_t> gmWorkspace;
-        AscendC::LocalTensor<float> houseVec, scalar, workLocal, inputTensor, outputTensor;
-        AscendC::LocalTensor<int32_t> ubWorkspace;
-    };
-
-    extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
+    }
+    __aicore__ inline void initUV()
     {
-#ifndef _____PIPE_INSIDECLASS
-        AscendC::TPipe pipe;
-        if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
+        // cache 问题，AIV处理前需刷新Cache
+        for (int32_t i = aivIdx; i < m_; i += aivNum)
         {
-            if (AscendC::GetBlockIdx() == 0)
-            {
-                AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
-            }
-            Kernel_Golub_Kahan_Bidiagonalization kernel;
-            kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-#else
-        Kernel_Golub_Kahan_Bidiagonalization kernel;
-        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-#endif
-            kernel.Process();
+            uGm(i * m_ + i) = 1.0f;
         }
-        else
+        for (int32_t i = aivIdx; i < n_; i += aivNum)
         {
-#ifndef _____PIPE_INSIDECLASS
-            Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-            kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-#else
-        Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-#endif
-            kernel.Process();
+            vtGm(i * n_ + i) = 1.0f;
         }
     }
+
+private:
+    __aicore__ inline uint16_t GetJFirst(const uint16_t allJStart)
+    {
+        const auto j_floor = allJStart / aivNum * aivNum;
+        const auto jFirst = j_floor + aivIdx < allJStart ? j_floor + aivIdx + aivNum : j_floor + aivIdx;
+        return jFirst;
+    }
+
+private:
+    uint16_t m_, n_;
+    const uint8_t aivNum, aivIdx;
+#ifdef _____PIPE_INSIDECLASS
+    AscendC::TPipe pipe;
+#endif
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> houseVecBuf, scalarBuf, workLocalBuf, ubWorkspaceBuf;
+    AscendC::GlobalTensor<float> aGm, uGm, vtGm, dGm, eGm, tauqGm, taupGm;
+    AscendC::GlobalTensor<int32_t> gmWorkspace;
+    AscendC::LocalTensor<float> houseVec, scalar, workLocal, inputTensor, outputTensor;
+    AscendC::LocalTensor<int32_t> ubWorkspace;
+};
+
+extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
+{
+#ifndef _____PIPE_INSIDECLASS
+    AscendC::TPipe pipe;
+    if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
+    {
+        if (AscendC::GetBlockIdx() == 0)
+        {
+            AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
+        }
+        Kernel_Golub_Kahan_Bidiagonalization kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+#else
+    Kernel_Golub_Kahan_Bidiagonalization kernel;
+    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+#endif
+        kernel.Process();
+    }
+    else
+    {
+#ifndef _____PIPE_INSIDECLASS
+        Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+#else
+    Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+#endif
+        kernel.Process();
+    }
+}
