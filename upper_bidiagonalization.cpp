@@ -184,24 +184,9 @@ private:
                                               AscendC::GlobalTensor<float> &deGm)
     {
         auto x1 = aGm[aGmStart];
-
-        // Copy in
-        inputTensor = inQueue.AllocTensor<float>();
-        AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
-        inQueue.EnQue(inputTensor);
-
-        // Compute
-        inputTensor = inQueue.DeQue<float>();
+        float sigma;
         outputTensor = outQueue.AllocTensor<float>();
-
-        // copy inputTensor to outputTensor
-        // AscendC::Adds(outputTensor, inputTensor, 0.0f, ttl);
-        AscendC::DataCopy(outputTensor, inputTensor, ttl);
-        AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
-        AscendC::Mul(houseVec, inputTensor, inputTensor, ttl);
-        AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], ttl);
-        auto sigma = inputTensor(0);
-        inQueue.FreeTensor(inputTensor);
+        ComputeSigma<true, true, true>(ttl, aGmStart, copyInPadParams, copyInExtParams, sigma);
         if (sigma == 0)
         {
             tau(0) = 0;
@@ -223,19 +208,92 @@ private:
             }
             float v1sq = v1 * v1, v1_inv = 1.0f / v1;
             tau(0) = 2 * v1sq / (sigma + v1sq);
-            AscendC::Muls(outputTensor, outputTensor, v1_inv, ttl);
-            // AscendC::Adds(houseVec, outputTensor, 0.0f, ttl);
-            // AscendC::DataCopy(houseVec, outputTensor, ttl);
-            // AscendC::Duplicate(houseVec, 1.0f, 1);
-            AscendC::Duplicate(outputTensor, miu, 1);
-            outQueue.EnQue(outputTensor);
-
-            // Copy out
-            outputTensor = outQueue.DeQue<float>();
-            AscendC::DataCopyPad(aGm[aGmStart], outputTensor, copyOutExtParams);
-            outQueue.FreeTensor(outputTensor);
+            ComputeHouseVec<true, true, true>(ttl, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
         }
     }
+
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void ComputeSigma(const uint32_t ttl, const uint32_t aGmStart,
+                                        const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+                                        const AscendC::DataCopyExtParams &copyInExtParams,
+                                        float &sigma)
+    {
+        inputTensor = inQueue.AllocTensor<float>();
+        if constexpr (isColumn || isTailLoop)
+        {
+            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
+        }
+        else
+        {
+            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, {});
+        }
+
+        inQueue.EnQue(inputTensor);
+
+        // Compute
+        inputTensor = inQueue.DeQue<float>();
+        // copy the first inputTensor to outputTensor
+        if constexpr (isFirstLoop)
+        {
+            AscendC::DataCopy(outputTensor, inputTensor, ttl);
+            AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
+        }
+        AscendC::Mul(houseVec, inputTensor, inputTensor, ttl);
+        AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], ttl);
+        if constexpr (isFirstLoop)
+        {
+            sigma = inputTensor(0);
+        }
+        else
+        {
+            sigma += inputTensor(0);
+        }
+        inQueue.FreeTensor(inputTensor);
+    }
+    template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
+    __aicore__ inline void ComputeHouseVec(const uint32_t ttl,
+                                           const uint32_t aGmStart,
+                                           const AscendC::DataCopyPadExtParams<float> &copyInPadParams,
+                                           AscendC::DataCopyExtParams &copyInExtParams,
+                                           AscendC::DataCopyExtParams &copyOutExtParams,
+                                           const float v1_inv,
+                                           const float miu)
+    {
+        if constexpr (!isFirstLoop)
+        {
+            // 分配输入张量
+            inputTensor = inQueue.AllocTensor<float>();
+            if constexpr (isColumn || isTailLoop)
+            {
+                AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
+            }
+            else
+            {
+                AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, {});
+            }
+            inQueue.EnQue(inputTensor);
+            // 计算
+            inputTensor = inQueue.DeQue<float>();
+            outputTensor = outQueue.AllocTensor<float>();
+            AscendC::Muls(outputTensor, inputTensor, v1_inv, ttl);
+            inQueue.FreeTensor(inputTensor);
+        }
+        else
+        {
+            AscendC::Muls(outputTensor, outputTensor, v1_inv, ttl);
+            AscendC::Duplicate(outputTensor, miu, 1);
+        }
+
+        outQueue.EnQue(outputTensor);
+
+        // 拷贝输出
+        outputTensor = outQueue.DeQue<float>();
+
+        AscendC::DataCopyPad(aGm[aGmStart], outputTensor, copyOutExtParams);
+
+        outQueue.FreeTensor(outputTensor);
+    }
+
     template <bool isColumn>
     __aicore__ inline void ComputeHouseholderTiling(const uint32_t ttl, const uint32_t aGmStart,
                                                     const uint32_t effectiveLen,
@@ -267,14 +325,6 @@ private:
         }
         // more than one loop
         AscendC::DataCopyExtParams copyInExtParams, copyOutExtParams;
-        /*  __aicore__ DataCopyExtParams()
-    {
-        blockCount = DEFAULT_DATA_COPY_NBURST;
-        blockLen = 0;
-        srcStride = DEFAULT_DATA_COPY_STRIDE;
-        dstStride = DEFAULT_DATA_COPY_STRIDE;
-        rsv = 0;
-    }*/
         float x1 = aGm[aGmStart], sigma;
         // Compute sigma first
         outputTensor = outQueue.AllocTensor<float>();
@@ -287,49 +337,19 @@ private:
             copyInExtParams.srcStride = (n_ - 1) * sizeOfFloat;
             copyInExtParams.dstStride = 0;
 
-            inputTensor = inQueue.AllocTensor<float>();
-            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, copyInPadParams);
-            inQueue.EnQue(inputTensor);
-
-            // Compute
-            inputTensor = inQueue.DeQue<float>();
-            // copy the first inputTensor to outputTensor
-            AscendC::DataCopy(outputTensor, inputTensor, getQueueM());
-            AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
-            AscendC::Mul(houseVec, inputTensor, inputTensor, getQueueM());
-            AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], getQueueM());
-            sigma = inputTensor(0);
-            inQueue.FreeTensor(inputTensor);
-
+            ComputeSigma<isColumn, true>(getQueueM(), aGmStart, copyInPadParams, copyInExtParams, sigma);
             // formerLoopNum -1 loop
             for (int32_t i = 1; i < formerLoopNum; i++)
             {
-                inputTensor = inQueue.AllocTensor<float>();
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart + getQueueM() * i * n_], copyInExtParams, copyInPadParams);
-                inQueue.EnQue(inputTensor);
-
-                // Compute
-                inputTensor = inQueue.DeQue<float>();
-                AscendC::Mul(houseVec, inputTensor, inputTensor, getQueueM());
-                AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], getQueueM());
-                sigma += inputTensor(0);
-                inQueue.FreeTensor(inputTensor);
+                ComputeSigma<isColumn, false>(getQueueM(), aGmStart + getQueueM() * i * n_, copyInPadParams, copyInExtParams, sigma);
             }
 
             // tailLoop
             if (tailBytes > 0)
             {
                 copyInExtParams.blockCount = tailBytes / BlockSize;
-                inputTensor = inQueue.AllocTensor<float>();
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart + getQueueM() * formerLoopNum * n_], copyInExtParams, copyInPadParams);
-                inQueue.EnQue(inputTensor);
 
-                // Compute
-                inputTensor = inQueue.DeQue<float>();
-                AscendC::Mul(houseVec, inputTensor, inputTensor, copyInExtParams.blockCount);
-                AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], copyInExtParams.blockCount);
-                sigma += inputTensor(0);
-                inQueue.FreeTensor(inputTensor);
+                ComputeSigma<isColumn, false>(tailBytes / BlockSize, aGmStart + getQueueM() * formerLoopNum * n_, copyInPadParams, copyInExtParams, sigma);
             }
         }
         else
@@ -340,50 +360,20 @@ private:
             copyInExtParams.dstStride = 0;
             const uint32_t FixedBufferFloatCnt = FixedBufferSize / sizeOfFloat;
             // the first loop
-            //  Copy in
-            inputTensor = inQueue.AllocTensor<float>();
-            AscendC::DataCopyPad(inputTensor, aGm[aGmStart], copyInExtParams, {});
-            inQueue.EnQue(inputTensor);
-
-            // Compute
-            inputTensor = inQueue.DeQue<float>();
-            // copy inputTensor to outputTensor
-            AscendC::DataCopy(outputTensor, inputTensor, FixedBufferFloatCnt);
-            AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
-            AscendC::Mul(houseVec, inputTensor, inputTensor, FixedBufferFloatCnt);
-            AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], FixedBufferFloatCnt);
-            sigma = inputTensor(0);
-            inQueue.FreeTensor(inputTensor);
+            ComputeSigma<isColumn, true>(FixedBufferFloatCnt, aGmStart, copyInPadParams, copyInExtParams, sigma);
 
             // formerLoopNum -1 loop
             for (int32_t i = 1; i < formerLoopNum; i++)
             {
-                inputTensor = inQueue.AllocTensor<float>();
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart + FixedBufferFloatCnt * i], copyInExtParams, {});
-                inQueue.EnQue(inputTensor);
-                // Compute
-                inputTensor = inQueue.DeQue<float>();
-                // copy inputTensor to outputTensor
-                AscendC::DataCopy(outputTensor, inputTensor, FixedBufferFloatCnt);
-                AscendC::Mul(houseVec, inputTensor, inputTensor, FixedBufferFloatCnt);
-                AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], FixedBufferFloatCnt);
-                sigma += inputTensor(0);
-                inQueue.FreeTensor(inputTensor);
+                ComputeSigma<isColumn, false>(FixedBufferFloatCnt, aGmStart + FixedBufferFloatCnt * i, copyInPadParams, copyInExtParams, sigma);
             }
             // tailLoop
             if (tailBytes > 0)
             {
                 const uint32_t tailLoopLen = tailBytes / sizeOfFloat;
                 copyInExtParams.blockLen = tailLoopLen + effectiveLen - ttl; // tailLoopLen-padLen
-                inputTensor = inQueue.AllocTensor<float>();
-                AscendC::DataCopyPad(inputTensor, aGm[aGmStart + FixedBufferFloatCnt * formerLoopNum], copyInExtParams, copyInPadParams);
-                inQueue.EnQue(inputTensor);
-                // Compute
-                inputTensor = inQueue.DeQue<float>();
-                AscendC::Mul(houseVec, inputTensor, inputTensor, tailLoopLen);
-                AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], tailLoopLen);
-                sigma += inputTensor(0);
-                inQueue.FreeTensor(inputTensor);
+
+                ComputeSigma<isColumn, false, true>(tailLoopLen, aGmStart + FixedBufferFloatCnt * formerLoopNum, copyInPadParams, copyInExtParams, sigma);
             }
         }
         // Compute tau and HouseVec
@@ -416,51 +406,19 @@ private:
                 copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
                 copyInExtParams.blockCount = getQueueM();
                 // firstLoop
-                AscendC::Muls(outputTensor, outputTensor, v1_inv, getQueueM());
-                AscendC::Duplicate(outputTensor, miu, 1);
-                outQueue.EnQue(outputTensor);
-
-                // Copy out
-                outputTensor = outQueue.DeQue<float>();
-                AscendC::DataCopyPad(aGm[aGmStart], outputTensor, copyOutExtParams);
-                outQueue.FreeTensor(outputTensor);
+                ComputeHouseVec<isColumn, true>(getQueueM(), aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
                 // formerLoopNum -1 loop
                 for (int32_t i = 1; i < formerLoopNum; i++)
                 {
-                    // Copy In
-                    inputTensor = inQueue.AllocTensor<float>();
-                    AscendC::DataCopyPad(inputTensor, aGm[aGmStart + getQueueM() * i * n_], copyInExtParams, copyInPadParams);
-                    inQueue.EnQue(inputTensor);
-                    // Compute
-                    inputTensor = inQueue.DeQue<float>();
-                    outputTensor = outQueue.AllocTensor<float>();
-                    AscendC::Muls(outputTensor, inputTensor, v1_inv, getQueueM());
-                    outQueue.EnQue(outputTensor);
-
-                    // Copy out
-                    outputTensor = outQueue.DeQue<float>();
-                    AscendC::DataCopyPad(aGm[aGmStart + getQueueM() * i * n_], outputTensor, copyOutExtParams);
-                    outQueue.FreeTensor(outputTensor);
+                    ComputeHouseVec<isColumn, false>(getQueueM(), aGmStart + getQueueM() * i * n_, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
                 }
                 // tailLoop
                 if (tailBytes > 0)
                 {
                     copyOutExtParams.blockCount = tailBytes / BlockSize;
                     copyInExtParams.blockCount = tailBytes / BlockSize;
-                    // Copy In
-                    inputTensor = inQueue.AllocTensor<float>();
-                    AscendC::DataCopyPad(inputTensor, aGm[aGmStart + getQueueM() * formerLoopNum * n_], copyInExtParams, copyInPadParams);
-                    inQueue.EnQue(inputTensor);
-                    // Compute
-                    inputTensor = inQueue.DeQue<float>();
-                    outputTensor = outQueue.AllocTensor<float>();
-                    AscendC::Muls(outputTensor, inputTensor, v1_inv, copyInExtParams.blockCount);
-                    outQueue.EnQue(outputTensor);
 
-                    // Copy out
-                    outputTensor = outQueue.DeQue<float>();
-                    AscendC::DataCopyPad(aGm[aGmStart + getQueueM() * formerLoopNum * n_], outputTensor, copyOutExtParams);
-                    outQueue.FreeTensor(outputTensor);
+                    ComputeHouseVec<isColumn, false, true>(tailBytes / BlockSize, aGmStart + getQueueM() * formerLoopNum * n_, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
                 }
             }
             else
@@ -472,32 +430,12 @@ private:
                 copyInExtParams.blockLen = FixedBufferSize;
                 // firstLoop
                 // Copy In
-                AscendC::Muls(outputTensor, outputTensor, v1_inv, FixedBufferFloatCnt);
-                AscendC::Duplicate(outputTensor, miu, 1);
-                outQueue.EnQue(outputTensor);
-
-                // Copy out
-                outputTensor = outQueue.DeQue<float>();
-                AscendC::DataCopyPad(aGm[aGmStart], outputTensor, copyOutExtParams);
-                outQueue.FreeTensor(outputTensor);
+                ComputeHouseVec<isColumn, true>(FixedBufferFloatCnt, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
 
                 // formerLoopNum -1 loop
                 for (int32_t i = 1; i < formerLoopNum; i++)
                 {
-                    // Copy In
-                    inputTensor = inQueue.AllocTensor<float>();
-                    AscendC::DataCopyPad(inputTensor, aGm[aGmStart + FixedBufferFloatCnt * i], copyInExtParams, {});
-                    inQueue.EnQue(inputTensor);
-                    // Compute
-                    inputTensor = inQueue.DeQue<float>();
-                    outputTensor = outQueue.AllocTensor<float>();
-                    AscendC::Muls(outputTensor, inputTensor, v1_inv, FixedBufferFloatCnt);
-                    outQueue.EnQue(outputTensor);
-
-                    // Copy out
-                    outputTensor = outQueue.DeQue<float>();
-                    AscendC::DataCopyPad(aGm[aGmStart + FixedBufferFloatCnt * i], outputTensor, copyOutExtParams);
-                    outQueue.FreeTensor(outputTensor);
+                    ComputeHouseVec<isColumn, false>(FixedBufferFloatCnt, aGmStart + FixedBufferFloatCnt * i, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
                 }
                 // tailLoop
                 if (tailBytes > 0)
@@ -505,25 +443,12 @@ private:
                     const uint32_t tailLoopLen = tailBytes / sizeOfFloat;
                     copyOutExtParams.blockLen = tailLoopLen + effectiveLen - ttl; // tailLoopLen-padLen
                     copyInExtParams.blockLen = tailLoopLen + effectiveLen - ttl;
-                    // Copy In
-                    inputTensor = inQueue.AllocTensor<float>();
-                    AscendC::DataCopyPad(inputTensor, aGm[aGmStart + FixedBufferFloatCnt * formerLoopNum], copyInExtParams, copyInPadParams);
-                    inQueue.EnQue(inputTensor);
-                    // Compute
-                    inputTensor = inQueue.DeQue<float>();
-                    outputTensor = outQueue.AllocTensor<float>();
-                    AscendC::Muls(outputTensor, inputTensor, v1_inv, tailLoopLen);
-                    outQueue.EnQue(outputTensor);
 
-                    // Copy out
-                    outputTensor = outQueue.DeQue<float>();
-                    AscendC::DataCopyPad(aGm[aGmStart + FixedBufferFloatCnt * formerLoopNum], outputTensor, copyOutExtParams);
-                    outQueue.FreeTensor(outputTensor);
+                    ComputeHouseVec<isColumn, false, true>(tailLoopLen, aGmStart + FixedBufferFloatCnt * formerLoopNum, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
                 }
             }
         }
     }
-
     __aicore__ inline void ApplyColumnTransformV2(int32_t i)
     {
         // 应用列变换到右侧子矩阵
