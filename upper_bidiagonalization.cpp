@@ -18,7 +18,7 @@ __aicore__ inline constexpr T RoundUpDiv(T x, T div)
 }
 __aicore__ inline constexpr int32_t notTilingKGKBSize(int32_t M, int32_t N)
 {
-    return 3 * M * BlockSize + BlockSize + RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockFloatCnt;
+    return 3 * M * BlockSize + BlockSize + RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockSize + 40 * 32;
 }
 template <bool ifTiling = false>
 class Kernel_Golub_Kahan_Bidiagonalization
@@ -51,17 +51,15 @@ public:
         pipe.InitBuffer(ubWorkspaceBuf, aivNum * 32);
         ubWorkspace = ubWorkspaceBuf.Get<int32_t>();
 
-        if (aivIdx == 0)
-        {
-            initUV();
-        }
+
+        initUV();
 
         // 初始化管道缓冲区
         pipe.InitBuffer(inQueue, BUFFER_NUM, M * BlockSize);
         pipe.InitBuffer(outQueue, BUFFER_NUM, M * BlockSize);
         pipe.InitBuffer(houseVecBuf, M * BlockSize);
         pipe.InitBuffer(scalarBuf, sizeOfFloat);
-        pipe.InitBuffer(workLocalBuf, RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockFloatCnt);
+        pipe.InitBuffer(workLocalBuf, RoundUpDiv<int32_t>(RoundUpDiv<int32_t>(M, BlockNumPerOperation), BlockFloatCnt) * BlockSize);
 
         houseVec = houseVecBuf.Get<float>();
         scalar = scalarBuf.Get<float>();
@@ -313,8 +311,8 @@ private:
     }
     __aicore__ inline void GetUVt()
     {
-        // 刷新Cache，保证uGm、vGm与Cache的一致性
-        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        // 刷新Cache，保证uGm、vGm与Cache的一致性,由于之前Process已经刷新过，无需再刷新
+        // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         // get U
         for (int32_t i = n_ - 1; i >= 0; i--)
         {
@@ -376,11 +374,11 @@ private:
     __aicore__ inline void initUV()
     {
         // cache 问题，AIV处理前需刷新Cache
-        for (int32_t i = 0; i < m_; i++)
+        for (int32_t i = aivIdx; i < m_; i += aivNum)
         {
             uGm(i * m_ + i) = 1.0f;
         }
-        for (int32_t i = 0; i < n_; i++)
+        for (int32_t i = aivIdx; i < n_; i += aivNum)
         {
             vtGm(i * n_ + i) = 1.0f;
         }
@@ -409,10 +407,6 @@ private:
     AscendC::LocalTensor<int32_t> ubWorkspace;
 };
 
-template <>
-class Kernel_Golub_Kahan_Bidiagonalization<true>
-{
-};
 extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
 {
 #ifndef _____PIPE_INSIDECLASS
@@ -434,12 +428,12 @@ extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_A
     else
     {
 #ifndef _____PIPE_INSIDECLASS
-        // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-        // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, pipe);
+        Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
 #else
-    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup);
+    Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
 #endif
-        // kernel.Process();
+        kernel.Process();
     }
 }
