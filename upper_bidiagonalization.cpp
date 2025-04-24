@@ -145,9 +145,10 @@ private:
         // Compute
         inputTensor = inQueue.DeQue<float>();
         outputTensor = outQueue.AllocTensor<float>();
-        // copy inputTensor to outputTensor
-        AscendC::Adds(outputTensor, inputTensor, 0.0f, ttl);
         auto x1 = inputTensor(0);
+        // copy inputTensor to outputTensor
+        // AscendC::Adds(outputTensor, inputTensor, 0.0f, ttl);
+        AscendC::DataCopy(outputTensor, inputTensor, ttl);
         AscendC::Duplicate(inputTensor, 0.0f, 1); // to calculate x[2:len]Tx[2:len],first put the first element to 0.0f
         AscendC::Mul(houseVec, inputTensor, inputTensor, ttl);
         AscendC::ReduceSum(inputTensor, houseVec, inputTensor[BlockFloatCnt], ttl);
@@ -175,7 +176,8 @@ private:
             float v1sq = v1 * v1, v1_inv = 1.0f / v1;
             tau(0) = 2 * v1sq / (sigma + v1sq);
             AscendC::Muls(outputTensor, outputTensor, v1_inv, ttl);
-            AscendC::Adds(houseVec, outputTensor, 0.0f, ttl);
+            // AscendC::Adds(houseVec, outputTensor, 0.0f, ttl);
+            AscendC::DataCopy(houseVec, outputTensor, ttl);
             AscendC::Duplicate(houseVec, 1.0f, 1);
             AscendC::Duplicate(outputTensor, miu, 1);
             outQueue.EnQue(outputTensor);
@@ -272,7 +274,8 @@ private:
 
         // compute
         inputTensor = inQueue.DeQue<float>();
-        AscendC::Adds(houseVec, inputTensor, .0f, ttl);
+        // AscendC::Adds(houseVec, inputTensor, .0f, ttl);
+        AscendC::DataCopy(houseVec, inputTensor, ttl);
         AscendC::Duplicate(houseVec, 1.0f, 1);
         inQueue.FreeTensor(inputTensor);
     }
