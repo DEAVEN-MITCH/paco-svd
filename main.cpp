@@ -31,7 +31,9 @@ int main(int argc, char **argv)
     size_t VtMatrixFileSize = N * N * sizeof(float);
     size_t DArrayFileSize = N * sizeof(float);
     size_t EArrayFileSize = (N - 1) * sizeof(float);
-    
+    size_t TauqArrayFileSize = N * sizeof(float);
+    size_t TaupArrayFileSize = (N - 1) * sizeof(float);
+
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
     size_t userWorkspaceSize = 0;
     size_t systemWorkspaceSize = ascendcPlatform->GetLibApiWorkSpaceSize();
@@ -85,8 +87,18 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMallocHost((void **)(&EArrayHost), EArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&EArrayDevice, EArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
+    uint8_t *TauqArrayHost;
+    uint8_t *TauqArrayDevice;
+    CHECK_ACL(aclrtMallocHost((void **)(&TauqArrayHost), TauqArrayFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&TauqArrayDevice, TauqArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+
+    uint8_t *TaupArrayHost;
+    uint8_t *TaupArrayDevice;
+    CHECK_ACL(aclrtMallocHost((void **)(&TaupArrayHost), TaupArrayFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&TaupArrayDevice, TaupArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (1, stream, AMatrixDevice, UMatrixDevice, VtMatrixDevice, M, N, DArrayDevice, EArrayDevice);
+    (1, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
     std::cout << "finish" << std::endl;
@@ -96,6 +108,8 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(EArrayHost, EArrayFileSize, EArrayDevice, EArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(TauqArrayHost, TauqArrayFileSize, TauqArrayDevice, TauqArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(TaupArrayHost, TaupArrayFileSize, TaupArrayDevice, TaupArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     {
         // construct B matrix from D and E
         CHECK_ACL(aclrtMemset(AMatrixHost, AMatrixFileSize, 0, AMatrixFileSize));
@@ -119,6 +133,14 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtFreeHost(UMatrixHost));
     CHECK_ACL(aclrtFree(VtMatrixDevice));
     CHECK_ACL(aclrtFreeHost(VtMatrixHost));
+    CHECK_ACL(aclrtFree(DArrayDevice));
+    CHECK_ACL(aclrtFreeHost(DArrayHost));
+    CHECK_ACL(aclrtFree(EArrayDevice));
+    CHECK_ACL(aclrtFreeHost(EArrayHost));
+    CHECK_ACL(aclrtFree(TauqArrayDevice));
+    CHECK_ACL(aclrtFreeHost(TauqArrayHost));
+    CHECK_ACL(aclrtFree(TaupArrayDevice));
+    CHECK_ACL(aclrtFreeHost(TaupArrayHost));
     // CHECK_ACL(aclrtFree(TilingDevice));
     // CHECK_ACL(aclrtFreeHost(TilingHost));
     CHECK_ACL(aclrtFree(workspaceDevice));
