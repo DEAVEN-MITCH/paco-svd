@@ -328,29 +328,18 @@ private:
         float x1 = aGm[aGmStart], sigma;
         // Compute sigma first
         outputTensor = outQueue.AllocTensor<float>();
+        // the frist loop
+        //   Copy in
+        uint32_t subTtl, aGmStartStridePerFormerLoop, tailTtl;
         if constexpr (isColumn)
         {
-            // the frist loop
-            //   Copy in
             copyInExtParams.blockCount = getQueueM();
             copyInExtParams.blockLen = sizeOfFloat;
             copyInExtParams.srcStride = (n_ - 1) * sizeOfFloat;
             copyInExtParams.dstStride = 0;
-
-            ComputeSigma<isColumn, true>(getQueueM(), aGmStart, copyInPadParams, copyInExtParams, sigma);
-            // formerLoopNum -1 loop
-            for (int32_t i = 1; i < formerLoopNum; i++)
-            {
-                ComputeSigma<isColumn, false>(getQueueM(), aGmStart + getQueueM() * i * n_, copyInPadParams, copyInExtParams, sigma);
-            }
-
-            // tailLoop
-            if (tailBytes > 0)
-            {
-                copyInExtParams.blockCount = tailBytes / BlockSize;
-
-                ComputeSigma<isColumn, false>(tailBytes / BlockSize, aGmStart + getQueueM() * formerLoopNum * n_, copyInPadParams, copyInExtParams, sigma);
-            }
+            subTtl = getQueueM();
+            aGmStartStridePerFormerLoop = getQueueM() * n_;
+            tailTtl = tailBytes / BlockSize;
         }
         else
         {
@@ -358,24 +347,31 @@ private:
             copyInExtParams.blockLen = FixedBufferSize;
             copyInExtParams.srcStride = 0;
             copyInExtParams.dstStride = 0;
-            const uint32_t FixedBufferFloatCnt = FixedBufferSize / sizeOfFloat;
-            // the first loop
-            ComputeSigma<isColumn, true>(FixedBufferFloatCnt, aGmStart, copyInPadParams, copyInExtParams, sigma);
-
-            // formerLoopNum -1 loop
-            for (int32_t i = 1; i < formerLoopNum; i++)
-            {
-                ComputeSigma<isColumn, false>(FixedBufferFloatCnt, aGmStart + FixedBufferFloatCnt * i, copyInPadParams, copyInExtParams, sigma);
-            }
-            // tailLoop
-            if (tailBytes > 0)
-            {
-                const uint32_t tailLoopLen = tailBytes / sizeOfFloat;
-                copyInExtParams.blockLen = tailLoopLen + effectiveLen - ttl; // tailLoopLen-padLen
-
-                ComputeSigma<isColumn, false, true>(tailLoopLen, aGmStart + FixedBufferFloatCnt * formerLoopNum, copyInPadParams, copyInExtParams, sigma);
-            }
+            subTtl = FixedBufferSize / sizeOfFloat;
+            aGmStartStridePerFormerLoop = subTtl;
+            tailTtl = tailBytes / sizeOfFloat;
         }
+        ComputeSigma<isColumn, true>(subTtl, aGmStart, copyInPadParams, copyInExtParams, sigma);
+        // formerLoopNum -1 loop
+        for (int32_t i = 1; i < formerLoopNum; i++)
+        {
+            ComputeSigma<isColumn, false>(subTtl, aGmStart + aGmStartStridePerFormerLoop * i, copyInPadParams, copyInExtParams, sigma);
+        }
+        // tailLoop
+        if (tailBytes > 0)
+        {
+            if constexpr (isColumn)
+            {
+                copyInExtParams.blockCount = tailTtl;
+            }
+            else
+            {
+                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
+            }
+
+            ComputeSigma<isColumn, false, true>(tailTtl, aGmStart + aGmStartStridePerFormerLoop * formerLoopNum, copyInPadParams, copyInExtParams, sigma);
+        }
+
         // Compute tau and HouseVec
         if (sigma == 0)
         {
@@ -405,21 +401,6 @@ private:
                 copyOutExtParams.srcStride = 0;
                 copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
                 copyInExtParams.blockCount = getQueueM();
-                // firstLoop
-                ComputeHouseVec<isColumn, true>(getQueueM(), aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
-                // formerLoopNum -1 loop
-                for (int32_t i = 1; i < formerLoopNum; i++)
-                {
-                    ComputeHouseVec<isColumn, false>(getQueueM(), aGmStart + getQueueM() * i * n_, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
-                }
-                // tailLoop
-                if (tailBytes > 0)
-                {
-                    copyOutExtParams.blockCount = tailBytes / BlockSize;
-                    copyInExtParams.blockCount = tailBytes / BlockSize;
-
-                    ComputeHouseVec<isColumn, false, true>(tailBytes / BlockSize, aGmStart + getQueueM() * formerLoopNum * n_, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
-                }
             }
             else
             {
@@ -428,24 +409,25 @@ private:
                 copyOutExtParams.srcStride = 0;
                 copyOutExtParams.dstStride = 0;
                 copyInExtParams.blockLen = FixedBufferSize;
-                // firstLoop
-                // Copy In
-                ComputeHouseVec<isColumn, true>(FixedBufferFloatCnt, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
-
-                // formerLoopNum -1 loop
-                for (int32_t i = 1; i < formerLoopNum; i++)
+            }
+            ComputeHouseVec<isColumn, true>(subTtl, aGmStart, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
+            for (int32_t i = 1; i < formerLoopNum; i++)
+            {
+                ComputeHouseVec<isColumn, false>(subTtl, aGmStart + aGmStartStridePerFormerLoop * i, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
+            }
+            if (tailBytes > 0)
+            {
+                if constexpr (isColumn)
                 {
-                    ComputeHouseVec<isColumn, false>(FixedBufferFloatCnt, aGmStart + FixedBufferFloatCnt * i, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
+                    copyOutExtParams.blockCount = tailTtl;
+                    copyInExtParams.blockCount = tailTtl;
                 }
-                // tailLoop
-                if (tailBytes > 0)
+                else
                 {
-                    const uint32_t tailLoopLen = tailBytes / sizeOfFloat;
-                    copyOutExtParams.blockLen = tailLoopLen + effectiveLen - ttl; // tailLoopLen-padLen
-                    copyInExtParams.blockLen = tailLoopLen + effectiveLen - ttl;
-
-                    ComputeHouseVec<isColumn, false, true>(tailLoopLen, aGmStart + FixedBufferFloatCnt * formerLoopNum, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
+                    copyOutExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                    copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
                 }
+                ComputeHouseVec<isColumn, false, true>(tailTtl, aGmStart + aGmStartStridePerFormerLoop * formerLoopNum, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
             }
         }
     }
