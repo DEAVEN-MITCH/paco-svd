@@ -13,6 +13,7 @@ int main(int argc, char **argv)
 {
     unsigned int deviceId, M, N;
     deviceId = 0;
+    unsigned int blockNum = 40;
     std::ifstream args_file("../args.txt");
     std::string m_str, n_str;
     args_file >> m_str >> n_str;
@@ -35,7 +36,7 @@ int main(int argc, char **argv)
     size_t TaupArrayFileSize = (N - 1) * sizeof(float);
 
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
-    size_t userWorkspaceSize = 0;
+    size_t userWorkspaceSize = blockNum * 32; // 软同步需要的GM工作空间
     size_t systemWorkspaceSize = ascendcPlatform->GetLibApiWorkSpaceSize();
     size_t workspaceSize = userWorkspaceSize + systemWorkspaceSize;
     // size_t workspaceSize = M * N * sizeof(float);
@@ -47,6 +48,7 @@ int main(int argc, char **argv)
 
     uint8_t *workspaceDevice;
     CHECK_ACL(aclrtMalloc((void **)&workspaceDevice, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMemset(workspaceDevice, userWorkspaceSize, 0, userWorkspaceSize)); // 初始化GM工作空间为0
 
     uint8_t *AMatrixHost;
     uint8_t *AMatrixDevice;
@@ -98,7 +100,7 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&TaupArrayDevice, TaupArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (1, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice);
+    (blockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, workspaceDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
     std::cout << "finish" << std::endl;
