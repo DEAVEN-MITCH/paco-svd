@@ -22,6 +22,7 @@ __aicore__ inline constexpr int32_t notTilingKGKBSize(int32_t M, int32_t N)
 }
 __aicore__ inline constexpr int32_t getQueueM()
 {
+    // return 1024;
     return static_cast<int32_t>(((192 << 10) - 41 * 32) / ((1 + 2 * BUFFER_NUM) * 32 + .5f));
 }
 constexpr int32_t FixedBufferSize = getQueueM() * BlockSize;
@@ -30,11 +31,11 @@ class Kernel_Golub_Kahan_Bidiagonalization
 {
 public:
     __aicore__ inline Kernel_Golub_Kahan_Bidiagonalization() : aivIdx(AscendC::GetBlockIdx()), aivNum(AscendC::GetBlockNum()) {}
-#ifdef _____PIPE_INSIDECLASS
-    __aicore__ inline void Init(const int32_t M, const int32_t N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
-#else
+    // #ifdef _____PIPE_INSIDECLASS
+    // __aicore__ inline void Init(const int32_t M, const int32_t N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
+    // #else
     __aicore__ inline void Init(const int32_t M, const int32_t N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace, AscendC::TPipe &pipe)
-#endif
+    // #endif
     {
         // if (AscendC::GetBlockIdx() != 0)
         // return;
@@ -84,7 +85,7 @@ public:
         // 主循环：对每一列和行进行Householder变换
         for (int32_t i = 0; i < n_; i++)
         {
-            // AscendC::printf("ith column transform: %d\n", i);
+            // PrintDebugMessage("ith column transform: %d\n", i);
             if (i < n_)
             {
                 // 计算列的Householder变换
@@ -92,13 +93,14 @@ public:
                 // because we use scalar to modify GM such as dGm, we need to clean the cache of uGm
                 AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
                 AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
+                // PrintDebugMessage("after compute column householder: %d\n", i);
                 // 应用列变换到剩余的矩阵
                 ApplyColumnTransformV2(i);
                 // no Gm modified by scalar, so we don't need to clean the cache of uGm
                 AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
-
-            // AscendC::printf("ith row transform: %d\n", i);
+            // PrintDebugMessage("ith column transform: %d\n", i);
+            // PrintDebugMessage("ith row transform: %d\n", i);
             if (i < n_ - 1)
             {
                 // 计算行的Householder变换
@@ -111,6 +113,7 @@ public:
                 // no Gm modified by scalar, so we don't need to clean the cache of vtGm
                 AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
+            // PrintDebugMessage("ith row transform: %d\n", i);
         }
 
         GetUVt();
@@ -196,6 +199,8 @@ private:
         else
         {
             auto miu = std::sqrt(x1 * x1 + sigma);
+            // PrintDebugMessage("x1:%f,sigma:%f,miu:%f\n", x1, sigma, miu);
+
             deGm(0) = miu;
             float v1;
             if (x1 <= 0)
@@ -238,6 +243,9 @@ private:
         {
             sigma += inputTensor(0);
         }
+        // DumpTensor(houseVec, 5, RoundUpDiv(1024, 32) * 32);
+        // PrintDebugMessage("ttl:%dsigma:%f\n", ttl, sigma);
+
         inQueue.FreeTensor(inputTensor);
     }
     template <bool isColumn, bool isFirstLoop, bool isTailLoop = false>
@@ -311,6 +319,9 @@ private:
         // the frist loop
         //   Copy in
         uint32_t subTtl, aGmStartStridePerFormerLoop, tailTtl;
+        subTtl = FixedBufferSize / sizeOfFloat;
+        tailTtl = tailBytes / sizeOfFloat;
+        uint32_t tailParam;
         if constexpr (isColumn)
         {
             copyInExtParams.blockCount = getQueueM();
@@ -321,9 +332,8 @@ private:
             copyOutExtParams.blockLen = sizeOfFloat;
             copyOutExtParams.srcStride = 0;
             copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
-            subTtl = getQueueM();
             aGmStartStridePerFormerLoop = getQueueM() * n_;
-            tailTtl = tailBytes / BlockSize;
+            tailParam = tailTtl/BlockFloatCnt;
         }
         else
         {
@@ -335,9 +345,8 @@ private:
             copyOutExtParams.blockLen = FixedBufferSize;
             copyOutExtParams.srcStride = 0;
             copyOutExtParams.dstStride = 0;
-            subTtl = FixedBufferSize / sizeOfFloat;
             aGmStartStridePerFormerLoop = subTtl;
-            tailTtl = tailBytes / sizeOfFloat;
+            tailParam = tailTtl+effectiveLen-ttl;
         }
         ComputeSigma<isColumn, true>(subTtl, aGmStart, copyInPadParams, copyInExtParams, sigma);
         // formerLoopNum -1 loop
@@ -350,11 +359,11 @@ private:
         {
             if constexpr (isColumn)
             {
-                copyInExtParams.blockCount = tailTtl;
+                copyInExtParams.blockCount = tailParam;
             }
             else
             {
-                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyInExtParams.blockLen = tailParam;
             }
 
             ComputeSigma<isColumn, false, true>(tailTtl, aGmStart + aGmStartStridePerFormerLoop * formerLoopNum, copyInPadParams, copyInExtParams, sigma);
@@ -370,6 +379,7 @@ private:
         else
         {
             auto miu = std::sqrt(x1 * x1 + sigma);
+            // PrintDebugMessage("x1:%f,sigma:%f,miu:%f\n", x1, sigma, miu);
             deGm(0) = miu;
             float v1;
             if (x1 <= 0)
@@ -401,13 +411,13 @@ private:
             {
                 if constexpr (isColumn)
                 {
-                    copyOutExtParams.blockCount = tailTtl;
-                    copyInExtParams.blockCount = tailTtl;
+                    copyOutExtParams.blockCount = tailParam;
+                    copyInExtParams.blockCount = tailParam;
                 }
                 else
                 {
-                    copyOutExtParams.blockLen = tailTtl + effectiveLen - ttl;
-                    copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                    copyOutExtParams.blockLen = tailParam;
+                    copyInExtParams.blockLen = tailParam;
                 }
                 ComputeHouseVec<isColumn, false, true>(tailTtl, aGmStart + aGmStartStridePerFormerLoop * formerLoopNum, copyInPadParams, copyInExtParams, copyOutExtParams, v1_inv, miu);
             }
@@ -658,25 +668,26 @@ private:
         // 初始化参数
         uint16_t subTtl;
         uint32_t aGmStartStridePerFormerLoop, tailTtl, targetGmStartStridePerFormerLoop;
+        subTtl = FixedBufferSize / sizeOfFloat;
+        tailTtl = tailBytes / sizeOfFloat;
+        uint32_t tailParam;
         if constexpr (isColumn)
         {
-            subTtl = getQueueM();
             aGmStartStridePerFormerLoop = getQueueM() * n_;
             targetGmStartStridePerFormerLoop = getQueueM() * targetLDN;
-            tailTtl = tailBytes / BlockSize;
-            copyInHouseVecExtParams = {subTtl, sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
-            copyInExtParams = {subTtl, sizeOfFloat, (targetLDN - 1) * sizeOfFloat, 0, 0};
-            copyOutExtParams = {subTtl, sizeOfFloat, 0, (targetLDN - 1) * sizeOfFloat, 0};
+            copyInHouseVecExtParams = {getQueueM(), sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
+            copyInExtParams = {getQueueM(), sizeOfFloat, (targetLDN - 1) * sizeOfFloat, 0, 0};
+            copyOutExtParams = {getQueueM(), sizeOfFloat, 0, (targetLDN - 1) * sizeOfFloat, 0};
+            tailParam=tailTtl/BlockFloatCnt;
         }
         else
         {
-            subTtl = FixedBufferSize / sizeOfFloat;
             aGmStartStridePerFormerLoop = subTtl;
             targetGmStartStridePerFormerLoop = subTtl;
-            tailTtl = tailBytes / sizeOfFloat;
             copyInHouseVecExtParams = {1, FixedBufferSize, 0, 0, 0};
             copyInExtParams = {1, FixedBufferSize, 0, 0, 0};
             copyOutExtParams = {1, FixedBufferSize, 0, 0, 0};
+            tailParam=tailTtl + effectiveLen - ttl;
         }
         outputTensor = outQueue.AllocTensor<float>();
 
@@ -693,17 +704,19 @@ private:
         {
             if constexpr (isColumn)
             {
-                copyInExtParams.blockCount = tailTtl;
-                copyInHouseVecExtParams.blockCount = tailTtl;
+                copyInExtParams.blockCount = tailParam;
+                copyInHouseVecExtParams.blockCount =  tailParam ;
             }
             else
             {
-                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
-                copyInHouseVecExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyInExtParams.blockLen =tailParam;
+                copyInHouseVecExtParams.blockLen = tailParam;
             }
             CalculateCoeffTiling<isColumn, false, true>(tailTtl, targetGmStart + formerLoopNum * targetGmStartStridePerFormerLoop, aGmStart + formerLoopNum * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, targetGm, coeff);
         }
         coeff *= beta;
+        // print coeff
+        // PrintDebugMessage("coeff:%f\n", coeff);
         // then calculate row - beta*row*v*vT
         if constexpr (isColumn)
         {
@@ -726,15 +739,15 @@ private:
         {
             if constexpr (isColumn)
             {
-                copyInExtParams.blockCount = tailTtl;
-                copyInHouseVecExtParams.blockCount = tailTtl;
-                copyOutExtParams.blockCount = tailTtl;
+                copyInExtParams.blockCount = tailParam;
+                copyInHouseVecExtParams.blockCount = tailParam;
+                copyOutExtParams.blockCount = tailParam;
             }
             else
             {
-                copyInExtParams.blockLen = tailTtl + effectiveLen - ttl;
-                copyInHouseVecExtParams.blockLen = tailTtl + effectiveLen - ttl;
-                copyOutExtParams.blockLen = tailTtl + effectiveLen - ttl;
+                copyInExtParams.blockLen = tailParam;
+                copyInHouseVecExtParams.blockLen = tailParam;
+                copyOutExtParams.blockLen = tailParam;
             }
             ApplyTransformStage2<isColumn, false, true>(tailTtl, targetGmStart + formerLoopNum * targetGmStartStridePerFormerLoop, aGmStart + formerLoopNum * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, copyOutExtParams, targetGm, coeff);
         }
@@ -765,6 +778,7 @@ private:
         // get U
         for (int32_t i = n_ - 1; i >= 0; i--)
         {
+            // PrintDebugMessage("before ith column transform of U: %d\n", i);
             // the i-th householder vector updates m_-i columns of U
             const uint16_t len = m_ - i;
             auto beta = tauqGm(i);
@@ -814,14 +828,15 @@ private:
                         }
                     }
                 }
-                AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
+            AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
         }
 
         // get Vt
         for (int32_t i = n_ - 2; i >= 0; i--)
         {
-            // the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
+            // PrintDebugMessage("before ith row transform of Vt: %d\n", i);
+            //  the i-th householder vector updates n_-i rows,n-i-1 columns of Vt
             const uint16_t len = n_ - i - 1;
             const uint8_t padLen = len % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - len % BlockFloatCnt;
             const uint32_t ttl = len + padLen;
@@ -872,8 +887,8 @@ private:
                         }
                     }
                 }
-                AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
             }
+            AscendC::SyncAll<true>(gmWorkspace, ubWorkspace);
         }
     }
     __aicore__ inline void initUV()
@@ -897,6 +912,15 @@ private:
         return jFirst;
     }
 
+    template <typename... Args>
+    __aicore__ inline void PrintDebugMessage(Args... args)
+    {
+        if (aivIdx == 0)
+        {
+            AscendC::printf(args...);
+        }
+    }
+
 private:
     uint16_t m_, n_;
     const uint8_t aivNum, aivIdx;
@@ -914,31 +938,31 @@ private:
 
 extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
 {
-#ifndef _____PIPE_INSIDECLASS
+    // #ifndef _____PIPE_INSIDECLASS
     AscendC::TPipe pipe;
-    if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
-    {
-        if (AscendC::GetBlockIdx() == 0)
-        {
-            AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
-        }
-        Kernel_Golub_Kahan_Bidiagonalization kernel;
-        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-#else
-    Kernel_Golub_Kahan_Bidiagonalization kernel;
-    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-#endif
-        kernel.Process();
-    }
-    else
-    {
-#ifndef _____PIPE_INSIDECLASS
-        Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-#else
+    // if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
+    // {
+    // if (AscendC::GetBlockIdx() == 0)
+    // {
+    // AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
+    // }
     Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-#endif
-        kernel.Process();
-    }
+    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+    // #else
+    // Kernel_Golub_Kahan_Bidiagonalization kernel;
+    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+    // #endif
+    kernel.Process();
+    // }
+    // else
+    // {
+    // #ifndef _____PIPE_INSIDECLASS
+    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+    // #else
+    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+    // #endif
+    // kernel.Process();
+    // }
 }
