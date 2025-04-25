@@ -2,7 +2,7 @@
 #include <cmath>
 #include "kernel_log.h"
 constexpr uint32_t sizeOfFloat = sizeof(float);
-constexpr int32_t BUFFER_NUM = 1;
+constexpr int32_t BUFFER_NUM = 2;
 constexpr int32_t maxL1FloatSize = 1 << (19 - 2);
 constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
@@ -939,6 +939,8 @@ private:
 extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
 {
     // #ifndef _____PIPE_INSIDECLASS
+    #ifdef __DAV_C220_VEC__
+
     AscendC::TPipe pipe;
     // if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
     // {
@@ -965,4 +967,5 @@ extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_A
     // #endif
     // kernel.Process();
     // }
+    #endif
 }
