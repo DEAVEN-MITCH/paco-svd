@@ -2,7 +2,7 @@
 #include <cmath>
 #include "kernel_log.h"
 constexpr uint32_t sizeOfFloat = sizeof(float);
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BUFFER_NUM = 1;
 constexpr int32_t maxL1FloatSize = 1 << (19 - 2);
 constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
@@ -333,7 +333,7 @@ private:
             copyOutExtParams.srcStride = 0;
             copyOutExtParams.dstStride = (n_ - 1) * sizeOfFloat;
             aGmStartStridePerFormerLoop = getQueueM() * n_;
-            tailParam = tailTtl/BlockFloatCnt;
+            tailParam = tailTtl / BlockFloatCnt;
         }
         else
         {
@@ -346,7 +346,7 @@ private:
             copyOutExtParams.srcStride = 0;
             copyOutExtParams.dstStride = 0;
             aGmStartStridePerFormerLoop = subTtl;
-            tailParam = tailTtl+effectiveLen-ttl;
+            tailParam = tailTtl + effectiveLen - ttl;
         }
         ComputeSigma<isColumn, true>(subTtl, aGmStart, copyInPadParams, copyInExtParams, sigma);
         // formerLoopNum -1 loop
@@ -678,7 +678,7 @@ private:
             copyInHouseVecExtParams = {getQueueM(), sizeOfFloat, (n_ - 1) * sizeOfFloat, 0, 0};
             copyInExtParams = {getQueueM(), sizeOfFloat, (targetLDN - 1) * sizeOfFloat, 0, 0};
             copyOutExtParams = {getQueueM(), sizeOfFloat, 0, (targetLDN - 1) * sizeOfFloat, 0};
-            tailParam=tailTtl/BlockFloatCnt;
+            tailParam = tailTtl / BlockFloatCnt;
         }
         else
         {
@@ -687,7 +687,7 @@ private:
             copyInHouseVecExtParams = {1, FixedBufferSize, 0, 0, 0};
             copyInExtParams = {1, FixedBufferSize, 0, 0, 0};
             copyOutExtParams = {1, FixedBufferSize, 0, 0, 0};
-            tailParam=tailTtl + effectiveLen - ttl;
+            tailParam = tailTtl + effectiveLen - ttl;
         }
         outputTensor = outQueue.AllocTensor<float>();
 
@@ -705,11 +705,11 @@ private:
             if constexpr (isColumn)
             {
                 copyInExtParams.blockCount = tailParam;
-                copyInHouseVecExtParams.blockCount =  tailParam ;
+                copyInHouseVecExtParams.blockCount = tailParam;
             }
             else
             {
-                copyInExtParams.blockLen =tailParam;
+                copyInExtParams.blockLen = tailParam;
                 copyInHouseVecExtParams.blockLen = tailParam;
             }
             CalculateCoeffTiling<isColumn, false, true>(tailTtl, targetGmStart + formerLoopNum * targetGmStartStridePerFormerLoop, aGmStart + formerLoopNum * aGmStartStridePerFormerLoop, copyInPadParams, copyInExtParams, copyInHouseVecExtParams, targetGm, coeff);
@@ -938,34 +938,34 @@ private:
 
 extern "C" __global__ __aicore__ void upper_bidiagonalization(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR tauq, GM_ADDR taup, GM_ADDR workspace)
 {
-    // #ifndef _____PIPE_INSIDECLASS
-    #ifdef __DAV_C220_VEC__
+// #ifndef _____PIPE_INSIDECLASS
+#ifdef __DAV_C220_VEC__
 
     AscendC::TPipe pipe;
-    // if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
-    // {
-    // if (AscendC::GetBlockIdx() == 0)
-    // {
-    // AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
-    // }
-    Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-    kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-    // #else
-    // Kernel_Golub_Kahan_Bidiagonalization kernel;
-    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-    // #endif
-    kernel.Process();
-    // }
-    // else
-    // {
-    // #ifndef _____PIPE_INSIDECLASS
-    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
-    // #else
-    // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
-    // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
-    // #endif
-    // kernel.Process();
-    // }
-    #endif
+    if (auto UBsizeRequired = notTilingKGKBSize(M, N); UBsizeRequired < (192 << 10))
+    {
+        // if (AscendC::GetBlockIdx() == 0)
+        // {
+        // AscendC::printf("the UBsizeRequired is %d\n", UBsizeRequired);
+        // }
+        Kernel_Golub_Kahan_Bidiagonalization<false> kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+        // #else
+        // Kernel_Golub_Kahan_Bidiagonalization kernel;
+        // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+        // #endif
+        kernel.Process();
+    }
+    else
+    {
+        // #ifndef _____PIPE_INSIDECLASS
+        Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+        kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace, pipe);
+        // #else
+        // Kernel_Golub_Kahan_Bidiagonalization<true> kernel;
+        // kernel.Init(M, N, a, u, vt, d, e, tauq, taup, workspace);
+        // #endif
+        kernel.Process();
+    }
+#endif
 }
