@@ -7,6 +7,6 @@
 **/cmake-build-*/
 test_bin
 trsm*
-*.md
+intro.md
 profing_data
 plog
