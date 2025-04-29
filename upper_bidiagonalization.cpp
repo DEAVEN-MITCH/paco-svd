@@ -2,7 +2,7 @@
 #include <cmath>
 #include "kernel_log.h"
 constexpr uint32_t sizeOfFloat = sizeof(float);
-constexpr int32_t BUFFER_NUM = 1;
+constexpr int32_t BUFFER_NUM = 2;
 constexpr int32_t maxL1FloatSize = 1 << (19 - 2);
 constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
