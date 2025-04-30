@@ -9,11 +9,14 @@
 #include "acl/acl.h"
 #include "aclrtlaunch_upper_bidiagonalization.h"
 #define debug(x) std::cerr << #x << ": " << x << std::endl
+
+#include "svd_tiling.h"
+
 int main(int argc, char **argv)
 {
     unsigned int deviceId, M, N;
     deviceId = 0;
-    unsigned int blockNum = 40,svdBlockNum = 1;
+    unsigned int bidiagonalizationBlockNum = 40, svdBlockNum = 1;
     std::ifstream args_file("../args.txt");
     std::string m_str, n_str;
     args_file >> m_str >> n_str;
@@ -36,10 +39,11 @@ int main(int argc, char **argv)
     size_t TaupArrayFileSize = (N - 1) * sizeof(float);
     size_t QMatrixFileSize = N * N * sizeof(float);
     size_t WtMatrixFileSize = N * N * sizeof(float);
-    // size_t TilingFileSize = svdBlockNum*;
+    size_t TilingFileSize = getTilingSize(N, svdBlockNum);
+    size_t idxFileSize = 16 * N * sizeof(uint32_t);
 
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
-    size_t userWorkspaceSize = blockNum * 32; // 软同步需要的GM工作空间
+    size_t userWorkspaceSize = bidiagonalizationBlockNum * 32; // 软同步需要的GM工作空间
     size_t systemWorkspaceSize = ascendcPlatform->GetLibApiWorkSpaceSize();
     size_t workspaceSize = userWorkspaceSize + systemWorkspaceSize;
     // size_t workspaceSize = M * N * sizeof(float);
@@ -62,13 +66,13 @@ int main(int argc, char **argv)
     // std::cout << "[MATRIX A]" << std::endl;
     // PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
-    // uint8_t *TilingHost;
-    // uint8_t *TilingDevice;
-    // CHECK_ACL(aclrtMallocHost((void **)(&TilingHost), TilingFileSize));
-    // CHECK_ACL(aclrtMalloc((void **)&TilingDevice, TilingFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    uint8_t *TilingHost;
+    uint8_t *TilingDevice;
+    CHECK_ACL(aclrtMallocHost((void **)(&TilingHost), TilingFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&TilingDevice, TilingFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    // GenerateTiling(M, N, blockDim, TilingHost, lim);
-    // CHECK_ACL(aclrtMemcpy(TilingDevice, TilingFileSize, TilingHost, TilingFileSize, ACL_MEMCPY_HOST_TO_DEVICE));
+    GenerateTiling(N, blockDim, TilingHost);
+    CHECK_ACL(aclrtMemcpy(TilingDevice, TilingFileSize, TilingHost, TilingFileSize, ACL_MEMCPY_HOST_TO_DEVICE));
 
     uint8_t *UMatrixHost;
     uint8_t *UMatrixDevice;
@@ -114,11 +118,15 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&WtMatrixDevice, WtMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     CHECK_ACL(aclrtMemset(WtMatrixDevice, WtMatrixFileSize, 0, WtMatrixFileSize));
 
+    uint8_t *idxDevice;
+    CHECK_ACL(aclrtMalloc((void **)&idxDevice, idxFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMemset(idxDevice, idxFileSize, 0, idxFileSize));
+
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (blockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, workspaceDevice);
+    (bidiagonalizationBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, idxDevice, workspaceDevice, TilingDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
-    std::cout << "finish" << std::endl;
+    std::cout << "finish bidiagonalization" << std::endl;
 
     // CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
