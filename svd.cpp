@@ -8,91 +8,125 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
 #include "kernel_operator.h"
-
-constexpr int32_t TOTAL_LENGTH = 8 * 2048;                            // total length of data
-constexpr int32_t USE_CORE_NUM = 8;                                   // num of core used
-constexpr int32_t BLOCK_LENGTH = TOTAL_LENGTH / USE_CORE_NUM;         // length computed of each core
-constexpr int32_t TILE_NUM = 8;                                       // split data into 8 tiles for each core
 constexpr int32_t BUFFER_NUM = 2;                                     // tensor num for each queue
 constexpr int32_t TILE_LENGTH = BLOCK_LENGTH / TILE_NUM / BUFFER_NUM; // separate to 2 parts, due to double buffer
-
-class another{
-    public:
-    __aicore__ inline another() {}
-    __aicore__ inline void Dosomething(int x, int y, int z)
+using namespace AscendC;
+// class another{
+//     public:
+//     __aicore__ inline another() {}
+//     __aicore__ inline void Dosomething(int x, int y, int z)
+// {
+//             AscendC::LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
+//         AscendC::LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
+// AscendC::PRINTF("in another!%d\n",x);
+// }    private:
+//     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
+//     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+//     AscendC::GlobalTensor<half> xGm;
+//     AscendC::GlobalTensor<half> yGm;
+//     AscendC::GlobalTensor<half> zGm;
+// };
+template <bool ifTiling = false, bool ifParallel = false>
+class BDC
 {
-            AscendC::LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
-        AscendC::LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
-AscendC::PRINTF("in another!%d\n",x);
-}    private:
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<half> xGm;
-    AscendC::GlobalTensor<half> yGm;
-    AscendC::GlobalTensor<half> zGm;
-};
-
-class KernelAdd {
 public:
-    __aicore__ inline KernelAdd() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z)
+    __aicore__ inline BDC() : blockIdx(AscendC::GetBlockIdx()), blockNum(AscendC::GetBlockNum()) {}
+    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR workspace, TPipe &pipe)
     {
-        another an;
-        an.Dosomething(1,2,3);
-        xGm.SetGlobalBuffer((__gm__ half *)x + BLOCK_LENGTH * AscendC::GetBlockIdx(), BLOCK_LENGTH);
-        yGm.SetGlobalBuffer((__gm__ half *)y + BLOCK_LENGTH * AscendC::GetBlockIdx(), BLOCK_LENGTH);
-        zGm.SetGlobalBuffer((__gm__ half *)z + BLOCK_LENGTH * AscendC::GetBlockIdx(), BLOCK_LENGTH);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, TILE_LENGTH * sizeof(half));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, TILE_LENGTH * sizeof(half));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, TILE_LENGTH * sizeof(half));
+        ASSERT(M >= N, "M must be greater than or equal to N");
+        LDM = M;
+        LDN = N;
+        tmpGm.SetGlobalBuffer((__gm__ float *)a, M * N);
+        uGm.SetGlobalBuffer((__gm__ float *)u, M * M);
+        vtGm.SetGlobalBuffer((__gm__ float *)vt, N * N);
+        dGm.SetGlobalBuffer((__gm__ float *)d, N);
+        eGm.SetGlobalBuffer((__gm__ float *)e, N - 1);
+        qGm.SetGlobalBuffer((__gm__ float *)q, N * N);
+        wtGm.SetGlobalBuffer((__gm__ float *)wt, N * N);
+        pipe.InitBuffer(workspaceBuf, blockNum * 32);
+
+        // workspace = workspaceBuf.Get<int32_t>();
     }
     __aicore__ inline void Process()
     {
-        another an;
-        int32_t loopCount = TILE_NUM * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        // reduction and for each sub bidiagonal matrix use BDC to get the SVD
+        initQWt();
+    }
+
+private:
+    __aicore__ inline void initQWt()
+    {
+#ifdef __DAV_C220_VEC__
+        // use aiv's scalars only
+        //  初始化q和wt为单位矩阵
+        for (int32_t i = blockIdx; i < LDN; i += blockNum)
+        {
+            qGm(i * LDN + i) = 1.0f;
+            wtGm(i * LDN + i) = 1.0f;
         }
+#endif
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
-    {
-        AscendC::LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
-        AscendC::LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
-        AscendC::DataCopy(xLocal, xGm[progress * TILE_LENGTH], TILE_LENGTH);
-        AscendC::DataCopy(yLocal, yGm[progress * TILE_LENGTH], TILE_LENGTH);
-        inQueueX.EnQue(xLocal);
-        inQueueY.EnQue(yLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<half> xLocal = inQueueX.DeQue<half>();
-        AscendC::LocalTensor<half> yLocal = inQueueY.DeQue<half>();
-        AscendC::LocalTensor<half> zLocal = outQueueZ.AllocTensor<half>();
-        AscendC::Add(zLocal, xLocal, yLocal, TILE_LENGTH);
-        outQueueZ.EnQue<half>(zLocal);
-        inQueueX.FreeTensor(xLocal);
-        inQueueY.FreeTensor(yLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<half> zLocal = outQueueZ.DeQue<half>();
-        AscendC::DataCopy(zGm[progress * TILE_LENGTH], zLocal, TILE_LENGTH);
-        outQueueZ.FreeTensor(zLocal);
-    }
-
-private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<half> xGm;
-    AscendC::GlobalTensor<half> yGm;
-    AscendC::GlobalTensor<half> zGm;
+    uint16_t LDM, LDN;
+    // in the beginning u and vt are orthogonal matrix, generated by bidiagonalization
+    // q and wt are orthogonal matrix, generated by BDC
+    // altogether,the singular matrix are uq,wtvt which
+    // would in the end be stored in uGm and vtGm
+    // d would be used to store singular values,and e would store the intermediate z;
+    GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qGm, wtGm;
+    const uint8_t blockIdx, blockNum;
 };
 
-extern "C" __global__ __aicore__ void svd_DC(GM_ADDR x)
+extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR workspace)
 {
+    TPipe pipe;
+    BDC bdc;
+    bdc.init(M, N, a, u, vt, d, e, q, wt, workspace, pipe);
+    for (int len = 1; len <= length; len *= 2)
+    {
+        for (int l1 = st; l1 <= ed; l1 += 2 * len)
+        {
+            int r1 = l1 + len - 1;
+            int l2 = l1 + len;
+            int r2 = l1 + 2 * len - 1;
+            if (r1 >= ed)
+            {
+                continue;
+            }
+            if (r2 >= ed)
+            {
+                r2 = ed;
+            }
+            printf("INNER_MERGING: (%d,%d),(%d,%d)\n", l1, r1, l2, r2);
+            // merge(l1,r1,l2,r2);
+        }
+    }
+    for (int len = 1; len <= num; len *= 2)
+    {
+        printf("outter len:%d\n", len);
+        if (idx % (2 * len))
+        {
+            // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
+            // CrossCoreWaitFlag(0x8);
+            continue;
+        }
+        int l1 = idx;
+        int r1 = idx + len - 1;
+        int l2 = idx + len;
+        int r2 = idx + 2 * len - 1;
+        if (r1 >= num - 1)
+        {
+            // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
+            // CrossCoreWaitFlag(0x8);
+            continue;
+        }
+        if (r2 >= num - 1)
+        {
+            r2 = num - 1;
+        }
+        printf("OUTTER_MERGING: (%d,%d),(%d,%d)\n", l1, r1, l2, r2);
+        // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
+        // CrossCoreWaitFlag(0x8);
+    }
 }

@@ -13,7 +13,7 @@ int main(int argc, char **argv)
 {
     unsigned int deviceId, M, N;
     deviceId = 0;
-    unsigned int blockNum = 40;
+    unsigned int blockNum = 40,svdBlockNum = 1;
     std::ifstream args_file("../args.txt");
     std::string m_str, n_str;
     args_file >> m_str >> n_str;
@@ -34,6 +34,9 @@ int main(int argc, char **argv)
     size_t EArrayFileSize = (N - 1) * sizeof(float);
     size_t TauqArrayFileSize = N * sizeof(float);
     size_t TaupArrayFileSize = (N - 1) * sizeof(float);
+    size_t QMatrixFileSize = N * N * sizeof(float);
+    size_t WtMatrixFileSize = N * N * sizeof(float);
+    // size_t TilingFileSize = svdBlockNum*;
 
     // size_t userWorkspaceSize = M * N * blockDim * sizeof(float);
     size_t userWorkspaceSize = blockNum * 32; // 软同步需要的GM工作空间
@@ -56,8 +59,8 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&AMatrixDevice, AMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     ReadFile("../input/A_gm.bin", AMatrixFileSize, AMatrixHost, AMatrixFileSize);
     CHECK_ACL(aclrtMemcpy(AMatrixDevice, AMatrixFileSize, AMatrixHost, AMatrixFileSize, ACL_MEMCPY_HOST_TO_DEVICE));
-    std::cout << "[MATRIX A]" << std::endl;
-    PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
+    // std::cout << "[MATRIX A]" << std::endl;
+    // PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
     // uint8_t *TilingHost;
     // uint8_t *TilingDevice;
@@ -84,20 +87,32 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMallocHost((void **)(&DArrayHost), DArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&DArrayDevice, DArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    uint8_t *EArrayHost;
+    // uint8_t *EArrayHost;
     uint8_t *EArrayDevice;
-    CHECK_ACL(aclrtMallocHost((void **)(&EArrayHost), EArrayFileSize));
+    // CHECK_ACL(aclrtMallocHost((void **)(&EArrayHost), EArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&EArrayDevice, EArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    uint8_t *TauqArrayHost;
+    // uint8_t *TauqArrayHost;
     uint8_t *TauqArrayDevice;
-    CHECK_ACL(aclrtMallocHost((void **)(&TauqArrayHost), TauqArrayFileSize));
+    // CHECK_ACL(aclrtMallocHost((void **)(&TauqArrayHost), TauqArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&TauqArrayDevice, TauqArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    uint8_t *TaupArrayHost;
+    // uint8_t *TaupArrayHost;
     uint8_t *TaupArrayDevice;
-    CHECK_ACL(aclrtMallocHost((void **)(&TaupArrayHost), TaupArrayFileSize));
+    // CHECK_ACL(aclrtMallocHost((void **)(&TaupArrayHost), TaupArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&TaupArrayDevice, TaupArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+
+    // uint8_t *QMatrixHost;
+    uint8_t *QMatrixDevice;
+    // CHECK_ACL(aclrtMallocHost((void **)(&QMatrixHost), QMatrixFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&QMatrixDevice, QMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMemset(QMatrixDevice, QMatrixFileSize, 0, QMatrixFileSize));
+
+    // uint8_t *WtMatrixHost;
+    uint8_t *WtMatrixDevice;
+    // CHECK_ACL(aclrtMallocHost((void **)(&WtMatrixHost), WtMatrixFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&WtMatrixDevice, WtMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMemset(WtMatrixDevice, WtMatrixFileSize, 0, WtMatrixFileSize));
 
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
     (blockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, workspaceDevice);
@@ -105,29 +120,46 @@ int main(int argc, char **argv)
 
     std::cout << "finish" << std::endl;
 
+    // CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(EArrayHost, EArrayFileSize, EArrayDevice, EArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(TauqArrayHost, TauqArrayFileSize, TauqArrayDevice, TauqArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(TaupArrayHost, TaupArrayFileSize, TaupArrayDevice, TaupArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // {
+    //     // construct B matrix from D and E
+    //     CHECK_ACL(aclrtMemset(AMatrixHost, AMatrixFileSize, 0, AMatrixFileSize));
+    //     for (int32_t i = 0; i < N; i++)
+    //     {
+    //         reinterpret_cast<float *>(AMatrixHost)[i * N + i] = reinterpret_cast<float *>(DArrayHost)[i];
+    //         if (i < N - 1)
+    //             reinterpret_cast<float *>(AMatrixHost)[i * N + i + 1] = reinterpret_cast<float *>(EArrayHost)[i];
+    //     }
+    // }
+    // WriteFile("../output/U.bin", UMatrixHost, UMatrixFileSize);
+    // WriteFile("../output/B.bin", AMatrixHost, AMatrixFileSize);
+    // WriteFile("../output/Vt.bin", VtMatrixHost, VtMatrixFileSize);
+
+    // std::cout << "[MATRIX B]" << std::endl;
+    // PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
+
+    ACLRT_LAUNCH_KERNEL(svd_DC)
+    (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QMatrixDevice, WtMatrixDevice, workspaceDevice);
+
+    CHECK_ACL(aclrtSynchronizeStream(stream));
+    std::cout << "finish" << std::endl;
+
     CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
-    CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
-    CHECK_ACL(aclrtMemcpy(EArrayHost, EArrayFileSize, EArrayDevice, EArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
-    CHECK_ACL(aclrtMemcpy(TauqArrayHost, TauqArrayFileSize, TauqArrayDevice, TauqArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
-    CHECK_ACL(aclrtMemcpy(TaupArrayHost, TaupArrayFileSize, TaupArrayDevice, TaupArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+
     {
-        // construct B matrix from D and E
-        CHECK_ACL(aclrtMemset(AMatrixHost, AMatrixFileSize, 0, AMatrixFileSize));
-        for (int32_t i = 0; i < N; i++)
-        {
-            reinterpret_cast<float *>(AMatrixHost)[i * N + i] = reinterpret_cast<float *>(DArrayHost)[i];
-            if (i < N - 1)
-                reinterpret_cast<float *>(AMatrixHost)[i * N + i + 1] = reinterpret_cast<float *>(EArrayHost)[i];
-        }
+        // 直接将D数组作为奇异值向量输出
+        WriteFile("../output/sigma.bin", DArrayHost, DArrayFileSize);
     }
     WriteFile("../output/U.bin", UMatrixHost, UMatrixFileSize);
-    WriteFile("../output/B.bin", AMatrixHost, AMatrixFileSize);
     WriteFile("../output/Vt.bin", VtMatrixHost, VtMatrixFileSize);
-
-    std::cout << "[MATRIX B]" << std::endl;
-    PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
     CHECK_ACL(aclrtFree(AMatrixDevice));
     CHECK_ACL(aclrtFreeHost(AMatrixHost));
@@ -138,11 +170,15 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtFree(DArrayDevice));
     CHECK_ACL(aclrtFreeHost(DArrayHost));
     CHECK_ACL(aclrtFree(EArrayDevice));
-    CHECK_ACL(aclrtFreeHost(EArrayHost));
+    // CHECK_ACL(aclrtFreeHost(EArrayHost));
     CHECK_ACL(aclrtFree(TauqArrayDevice));
-    CHECK_ACL(aclrtFreeHost(TauqArrayHost));
+    // CHECK_ACL(aclrtFreeHost(TauqArrayHost));
     CHECK_ACL(aclrtFree(TaupArrayDevice));
-    CHECK_ACL(aclrtFreeHost(TaupArrayHost));
+    // CHECK_ACL(aclrtFreeHost(TaupArrayHost));
+    CHECK_ACL(aclrtFree(QMatrixDevice));
+    // CHECK_ACL(aclrtFreeHost(QMatrixHost));
+    CHECK_ACL(aclrtFree(WtMatrixDevice));
+    // CHECK_ACL(aclrtFreeHost(WtMatrixHost));
     // CHECK_ACL(aclrtFree(TilingDevice));
     // CHECK_ACL(aclrtFreeHost(TilingHost));
     CHECK_ACL(aclrtFree(workspaceDevice));

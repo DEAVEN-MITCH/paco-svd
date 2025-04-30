@@ -43,5 +43,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 cd ~/paco-svd/cmake-build-debug;./svd_main
-cd ~/paco-svd/scripts;python3 verify_result.py ../output ../output
+# cd ~/paco-svd/scripts;python3 verify_result.py ../output ../output
+cd ~/paco-svd/scripts;python3 verify_svd.py ../output
 
