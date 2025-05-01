@@ -2,7 +2,7 @@
 #include <cmath>
 #include "kernel_log.h"
 constexpr uint32_t sizeOfFloat = sizeof(float);
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BUFFER_NUM = 1;
 constexpr int32_t maxL1FloatSize = 1 << (19 - 2);
 constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
@@ -894,13 +894,41 @@ private:
     __aicore__ inline void initUV()
     {
         // cache 问题，AIV处理前需刷新Cache
-        for (int32_t i = aivIdx; i < m_; i += aivNum)
+        // 如果m/n过小，并行初始化会带来cacheline覆盖问题。
+        //cacheline大小为64字节
+        if (m_ < 16)
         {
-            uGm(i * m_ + i) = 1.0f;
+            if (aivIdx == 0)
+            {
+                for (int32_t i = 0; i < m_; i += 1)
+                {
+                    uGm(i * m_ + i) = 1.0f;
+                }
+            }
         }
-        for (int32_t i = aivIdx; i < n_; i += aivNum)
+        else
         {
-            vtGm(i * n_ + i) = 1.0f;
+            for (int32_t i = aivIdx; i < m_; i += aivNum)
+            {
+                uGm(i * m_ + i) = 1.0f;
+            }
+        }
+        if (n_ < 16)
+        {
+            if (aivIdx == 0)
+            {
+                for (int32_t i = 0; i < n_; i += 1)
+                {
+                    vtGm(i * n_ + i) = 1.0f;
+                }
+            }
+        }
+        else
+        {
+            for (int32_t i = aivIdx; i < n_; i += aivNum)
+            {
+                vtGm(i * n_ + i) = 1.0f;
+            }
         }
     }
 
