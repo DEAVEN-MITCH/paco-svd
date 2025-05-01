@@ -15,13 +15,13 @@ add_custom_command(OUTPUT ${GData} COMMAND rm -rf ${GData} && python3 ../scripts
 add_custom_target(gen_data DEPENDS ${GData})
 
 add_library(svd_tiling STATIC svd_tiling.cpp)
-target_include_directories(svd_tiling PRIVATE ${ASCEND_CANN_PACKAGE_PATH}/include)
+target_include_directories(svd_tiling PRIVATE ${ASCEND_CANN_PACKAGE_PATH}/include ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/tikcfw/kernel_tiling)
 target_link_libraries(svd_tiling INTERFACE platform register tiling_api)
 
 ascendc_library(svd_kernels STATIC svd.cpp)
 ascendc_compile_definitions(svd_kernels PRIVATE HAVE_WORKSPACE)
 ascendc_compile_definitions(svd_kernels PRIVATE HAVE_TILING)
-ascendc_compile_options(svd_kernels PRIVATE "-Wno-deprecated-declarations" "-D_GLIBCXX_USE_TBB_PAR_BACKEND=0")
+ascendc_compile_options(svd_kernels PRIVATE "-Wno-deprecated-declarations")
 # 如果CMAKE_BUILD_TYPE=Release，则不添加ASCENDC_DEBUG定义
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     ascendc_compile_definitions(svd_kernels PRIVATE -DASCENDC_DEBUG)
