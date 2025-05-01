@@ -1,5 +1,6 @@
 #include "kernel_operator.h"
-#include "svd_tiling.h"
+#include <lib/matmul_intf.h>
+
 constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
 constexpr float EPS = 1e-6;
 using namespace AscendC;
@@ -9,14 +10,51 @@ namespace
     {
         return b < 0 ? -a : a;
     }
+    __aicore__ inline void swap(float &a, float &b)
+    {
+        float tmp = a;
+        a = b;
+        b = tmp;
+    }
+    __aicore__ inline float fabs(float a)
+    {
+        return a < 0 ? -a : a;
+    }
 
+}
+namespace
+{
+    struct SVDTiling
+    {
+        // TCubeTiling tiling;
+        uint16_t stackSize;
+        uint32_t offset; // Bytes
+    };
+    struct SVDSubmatrixInfo
+    {
+        // the submatrix is [start_col:end_col-1,start_col:end_col] if end_col !=LDN else [start_col:end_col,start_col:end_col]
+        uint16_t start_col, end_col;
+    };
+    // currently one aiv,one aic
+    __aicore__ inline void CopyTiling(SVDTiling *tiling, GM_ADDR *svdStack, GM_ADDR tilingGM, int thread_id = 0)
+    {
+        uint32_t *ptr = reinterpret_cast<uint32_t *>(tiling);
+        auto tiling32 = reinterpret_cast<__gm__ uint32_t *>(tilingGM);
+
+        for (uint32_t i = 0; i < sizeof(SVDTiling) / sizeof(uint32_t); i++, ptr++)
+        {
+            *ptr = *(tiling32 + i);
+        }
+        *svdStack = tilingGM + tiling->offset;
+        return;
+    }
 }
 template <bool ifVecTiling = false, bool ifParallel = false>
 class BDC
 {
 public:
     __aicore__ inline BDC() : blockIdx(AscendC::GetBlockIdx()), blockNum(AscendC::GetBlockNum()) {}
-    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe)
+    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe)
     {
         if constexpr (!ifParallel)
         {
@@ -25,10 +63,11 @@ public:
                 return;
             }
         }
-        ASSERT(M >= N, "M must be greater than or equal to N");
+        ASSERT(M >= N && "M must be greater than or equal to N");
         LDM = M;
         LDN = N;
         svdTiling = tiling;
+        svdStackGm.SetGlobalBuffer((__gm__ uint16_t *)svdStack, tiling->stackSize);
         tmpGm.SetGlobalBuffer((__gm__ float *)a, M * N);
         uGm.SetGlobalBuffer((__gm__ float *)u, M * M);
         vtGm.SetGlobalBuffer((__gm__ float *)vt, N * N);
@@ -37,7 +76,7 @@ public:
         qGm.SetGlobalBuffer((__gm__ float *)q, N * N);
         wtGm.SetGlobalBuffer((__gm__ float *)wt, N * N);
         idxqGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
-        pipe.InitBuffer(workspaceBuf, blockNum * 32);
+        // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
         // workspace = workspaceBuf.Get<int32_t>();
     }
@@ -53,13 +92,11 @@ public:
         // reduction requires rotation in the end,may not be worth it
         // simply no reduction ,as sbdsdc does
         initQWt();
-        auto &svdStack = svdTiling->stack;
-        uint16_t stackSize = svdStack.stackSize;
-        uint16_t *stackPtr = svdStack.stackPtr;
+        uint16_t stackSize = svdTiling->stackSize;
         // init leaf node
         for (auto i = 0; i < stackSize; i++)
         {
-            compute_base_case_svd(stackPtr[i]);
+            compute_base_case_svd(getSVDSubmatrixInfo(i));
         }
         // merge
         while (stackSize != 1)
@@ -68,9 +105,9 @@ public:
             while (stack_idx < stackSize - 1)
             {
                 // have more than two subMatrix to merge
-                const SVDSubmatrixInfo leftSubMatrix = svdStack.stack[stack_idx++];
-                const SVDSubmatrixInfo rightSubMatrix = svdStack.stack[stack_idx++];
-                auto &mergedSubMatrix = svdStack.stack[newStackSize++];
+                const SVDSubmatrixInfo leftSubMatrix = getSVDSubmatrixInfo(stack_idx++);
+                const SVDSubmatrixInfo rightSubMatrix = getSVDSubmatrixInfo(stack_idx++);
+                auto &mergedSubMatrix = getSVDSubmatrixInfo(newStackSize++);
                 mergedSubMatrix.start_col = leftSubMatrix.start_col;
                 mergedSubMatrix.end_col = rightSubMatrix.end_col;
                 MergeSubMatrix(leftSubMatrix, rightSubMatrix);
@@ -78,7 +115,7 @@ public:
             if (stack_idx == stackSize - 1)
             // last tailing submatrix not merged
             {
-                svdStack.stack[newStackSize++] = svdStack.stack[stack_idx];
+                setSVDSubmatrixInfo(newStackSize++, getSVDSubmatrixInfo(stack_idx));
             }
             // update the condition
             stackSize = newStackSize;
@@ -122,7 +159,7 @@ private:
     __aicore__ inline void compute_base_case_svd(const SVDSubmatrixInfo &subMatrix)
     {
         const auto idx_start = subMatrix.start_col;
-        const auto colNum = idx_end - idx_start + 1;
+        const auto colNum = subMatrix.end_col - idx_start + 1;
         const auto rowNum = subMatrix.end_col == LDN ? colNum : colNum - 1;
         GlobalTensor<float> q = qGm[idx_start * LDN + idx_start];
         GlobalTensor<float> wt = wtGm[idx_start * LDN + idx_start];
@@ -225,14 +262,14 @@ private:
             }
             d(0) = sigma1;
             d(1) = sigma2;
-            float u1 = sigma1 - m22, u2 = m12, v1 = a11 * u1, v2 = a12 * (sigma1 - a23 * a23), v3 = a12 * a22 * a23;
+            float u1 = sigma1 * sigma1 - m22, u2 = m12, v1 = a11 * u1, v2 = a12 * (sigma1 * sigma1 - a23 * a23), v3 = a12 * a22 * a23;
             float normu = sqrt(u1 * u1 + u2 * u2), normv = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
             q(0) = u1 / normu;
             q(LDN) = u2 / normu;
             wt(0) = v1 / normv;
             wt(1) = v2 / normv;
             wt(2) = v3 / normv;
-            u1 = sigma2 - m22, v1 = a11 * u1, v2 = a12 * (sigma2 - a23 * a23);
+            u1 = sigma2 * sigma2 - m22, v1 = a11 * u1, v2 = a12 * (sigma2 * sigma2 - a23 * a23);
             normu = sqrt(u1 * u1 + u2 * u2), normv = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
             q(1) = u1 / normu;
             q(LDN + 1) = u2 / normu;
@@ -332,13 +369,13 @@ private:
             }
             d(0) = sigma1;
             d(1) = sigma2;
-            float v1 = sigma1 - a12 * a12 - m22, v2 = a11 * a12, u1 = sigma1 - m22, u2 = m12;
+            float v1 = sigma1 * sigma1 - a12 * a12 - m22, v2 = a11 * a12, u1 = sigma1 * sigma1 - m22, u2 = m12;
             float normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
             wt(0) = v1 / normv;
             wt(1) = v2 / normv;
             q(0) = u1 / normu;
             q(LDN) = u2 / normu;
-            v1 = sigma2 - a12 * a12 - m22, u1 = sigma2 - m22;
+            v1 = sigma2 * sigma2 - a12 * a12 - m22, u1 = sigma2 * sigma2 - m22;
             normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
             wt(LDN) = v1 / normv;
             wt(LDN + 1) = v2 / normv;
@@ -388,6 +425,15 @@ private:
         // all rows of Vt are updated
     }
 
+    __aicore__ inline SVDSubmatrixInfo getSVDSubmatrixInfo(uint16_t idx)
+    {
+        return {svdStackGm(2 * idx), svdStackGm(2 * idx + 1)};
+    }
+    __aicore__ inline void setSVDSubmatrixInfo(uint16_t idx, SVDSubmatrixInfo info)
+    {
+        svdStackGm(2 * idx) = info.start_col;
+        svdStackGm(2 * idx + 1) = info.end_col;
+    }
 private:
     uint16_t LDM, LDN;
     // in the beginning u and vt are orthogonal matrix, generated by bidiagonalization
@@ -397,25 +443,20 @@ private:
     // d would be used to store singular values,and e would store the intermediate z;
     GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qGm, wtGm;
     GlobalTensor<uint32_t> idxqGm;
+    GlobalTensor<uint16_t> svdStackGm;
     const uint8_t blockIdx, blockNum;
     SVDTiling *svdTiling;
 };
 
-__aicore__ inline void CopyTiling(SVDTiling **tiling, GM_ADDR tilingGM, int thread_id = 0)
-{
-    // currently one aiv,one aic
-    *tiling = static_cast<SVDTiling *>(tilingGM);
-    *tiling->stack.stackPtr = tilingGM + sizeof(SVDTiling); // GM_ADDR is essentially a uint8_t*
-}
-
-extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, GM_ADDR tiling)
+extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, GM_ADDR tilingGM)
 {
 #ifdef __DAV_C220_VEC__
     TPipe pipe;
     BDC bdc;
-    SVDTiling *tiling;
-    CopyTiling(&tiling, tilingGM);
-    bdc.init(M, N, a, u, vt, d, e, q, wt, idx, workspace, tiling, pipe);
+    SVDTiling tiling;
+    GM_ADDR svdStack;
+    CopyTiling(&tiling, &svdStack, tilingGM);
+    bdc.init(M, N, a, u, vt, d, e, q, wt, idx, svdStack, workspace, &tiling, pipe);
 
     // for (int len = 1; len <= length; len *= 2)
     // {

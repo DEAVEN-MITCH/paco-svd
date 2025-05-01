@@ -1,6 +1,31 @@
-#include "svd_tiling.h"
+#include <cstdint>
+#include "tiling/platform/platform_ascendc.h"
+#include <tiling/tiling_api.h>
 
-size_t getTilingSize(int N, int svdBlockNum)
+namespace
+{
+    struct SVDSubmatrixInfo
+    {
+        // the submatrix is [start_col:end_col-1,start_col:end_col] if end_col !=LDN else [start_col:end_col,start_col:end_col]
+        uint16_t start_col, end_col;
+    };
+
+    // struct SVDStack {
+    // SVDSubmatrixInfo* stackPtr;
+    // uint16_t stackSize;
+    // };
+
+    struct SVDTiling
+    {
+        // TCubeTiling tiling;
+        uint16_t stackSize;
+        uint32_t offset;//Bytes
+    };
+    constexpr int getFirstStackElementOffset(int svdBlockNum=1){
+        return (sizeof(SVDTiling) + 31) / 32 * 32 * svdBlockNum;
+    }
+}
+int getTilingSize(int N, int svdBlockNum = 1)
 {
     // currently one aiv,one aic
     // compute the basic matrix quantity
@@ -12,52 +37,53 @@ size_t getTilingSize(int N, int svdBlockNum)
     // auto tailStackNum=aivNum-formerStackNum;
     // formerStack has stackSize of formerStackSize.
 
-    return (sizeof(SVDTiling) + sizeof(SVDSubmatrixInfo) * totalStackSize);
+    return getFirstStackElementOffset(svdBlockNum) + sizeof(SVDSubmatrixInfo) * totalStackSize;
 }
 
 // Tiling: SVDTiling+SVDStack,currently one aiv ,one aic
-void GenerateTiling(int N, int blockDim, uint8_t *TilingHost)
+void GenerateTiling(int N, int svdBlockNum, uint8_t *TilingHost)
 {
-    SVDTiling *tiling = static_cast<SVDTiling *>(TilingHost);
-    tiling->stack.stackPtr = TilingHost + sizeof(SVDTiling);
-    tiling->stack.stackSize = N / 3 + 1;
-    auto &svdStack = tiling->stack;
+    SVDTiling *tiling = reinterpret_cast<SVDTiling *>(TilingHost);
+    auto totolStackSize = N / 3 + 1;
+    tiling->stackSize = totolStackSize;
+    tiling->offset = getFirstStackElementOffset(svdBlockNum);
+    SVDSubmatrixInfo *svdStack = reinterpret_cast<SVDSubmatrixInfo *>(TilingHost + getFirstStackElementOffset(svdBlockNum));
     auto remainder = N % 3;
     // remainder==0,N/3-1个2x3+1x2+1x1
     // remainder==1,N/3个2x3+1x1
     // remainder==2,N/3个2x3+2x2
-    for (int i = 0; i < tiling->stack.stackSize - 2; i++)
+    for (int i = 0; i < totolStackSize - 2; i++)
     {
-        svdStack.stackPtr[i].start_col = i * 3;
-        svdStack.stackPtr[i].end_col = i * 3 + 3;
+        svdStack[i].start_col = i * 3;
+        svdStack[i].end_col = i * 3 + 3;
     }
     // init stack.stackSize-2 th SVDSubmatrixInfo
-    int i = tiling->stack.stackSize - 2;
+    int i = totolStackSize - 2;
     if (remainder == 0)
     {
-        svdStack.stackPtr[i].start_col = i * 3;
-        svdStack.stackPtr[i].end_col = i * 3 + 2;
+        svdStack[i].start_col = i * 3;
+        svdStack[i].end_col = i * 3 + 2;
     }
     else
     {
-        svdStack.stackPtr[i].start_col = i * 3;
-        svdStack.stackPtr[i].end_col = i * 3 + 3;
+        svdStack[i].start_col = i * 3;
+        svdStack[i].end_col = i * 3 + 3;
     }
     // init stack.stackSize-1 th SVDSubmatrixInfo
-    i = tiling->stack.stackSize - 1;
+    i = totolStackSize - 1;
     switch (remainder)
     {
     case 0:
-        svdStack.stackPtr[i].start_col = i * 3 - 1;
-        svdStack.stackPtr[i].end_col = i * 3;
+        svdStack[i].start_col = i * 3 - 1;
+        svdStack[i].end_col = i * 3;
         break;
     case 1:
-        svdStack.stackPtr[i].start_col = i * 3;
-        svdStack.stackPtr[i].end_col = i * 3 + 1;
+        svdStack[i].start_col = i * 3;
+        svdStack[i].end_col = i * 3 + 1;
         break;
     case 2:
-        svdStack.stackPtr[i].start_col = i * 3;
-        svdStack.stackPtr[i].end_col = i * 3 + 2;
+        svdStack[i].start_col = i * 3;
+        svdStack[i].end_col = i * 3 + 2;
         break;
     }
     return;
