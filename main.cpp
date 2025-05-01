@@ -8,10 +8,10 @@
 
 #include "acl/acl.h"
 #include "aclrtlaunch_upper_bidiagonalization.h"
+#include "aclrtlaunch_svd_DC.h"
 #define debug(x) std::cerr << #x << ": " << x << std::endl
-
-#include "svd_tiling.h"
-
+extern int getTilingSize(int N, int svdBlockNum);
+extern void GenerateTiling(int N, int blockDim, uint8_t *TilingHost);
 int main(int argc, char **argv)
 {
     unsigned int deviceId, M, N;
@@ -71,7 +71,7 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMallocHost((void **)(&TilingHost), TilingFileSize));
     CHECK_ACL(aclrtMalloc((void **)&TilingDevice, TilingFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    GenerateTiling(N, blockDim, TilingHost);
+    GenerateTiling(N, svdBlockNum, TilingHost);
     CHECK_ACL(aclrtMemcpy(TilingDevice, TilingFileSize, TilingHost, TilingFileSize, ACL_MEMCPY_HOST_TO_DEVICE));
 
     uint8_t *UMatrixHost;
@@ -123,7 +123,7 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMemset(idxDevice, idxFileSize, 0, idxFileSize));
 
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
-    (bidiagonalizationBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, idxDevice, workspaceDevice, TilingDevice);
+    (bidiagonalizationBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, workspaceDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
 
     std::cout << "finish bidiagonalization" << std::endl;
@@ -153,7 +153,7 @@ int main(int argc, char **argv)
     // PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
 
     ACLRT_LAUNCH_KERNEL(svd_DC)
-    (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QMatrixDevice, WtMatrixDevice, workspaceDevice);
+    (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QMatrixDevice, WtMatrixDevice, idxDevice, workspaceDevice, TilingDevice);
 
     CHECK_ACL(aclrtSynchronizeStream(stream));
     std::cout << "finish" << std::endl;
