@@ -1,7 +1,10 @@
 #include <cstdint>
+#include <iostream>
 #include "tiling/platform/platform_ascendc.h"
 #include <tiling/tiling_api.h>
+#include "kernel_tiling.h"
 
+using namespace matmul_tiling;
 namespace
 {
     struct SVDSubmatrixInfo
@@ -17,12 +20,48 @@ namespace
 
     struct SVDTiling
     {
-        // TCubeTiling tiling;
+        TCubeTiling matmultiling;
         uint16_t stackSize;
-        uint32_t offset;//Bytes
+        uint32_t offset; // Bytes
     };
-    constexpr int getFirstStackElementOffset(int svdBlockNum=1){
+    constexpr int getFirstStackElementOffset(int svdBlockNum = 1)
+    {
         return (sizeof(SVDTiling) + 31) / 32 * 32 * svdBlockNum;
+    }
+    void initTCubeTiling(TCubeTiling &tcubeTiling)
+    {
+
+        TPosition leftPosition = TPosition::GM;
+        CubeFormat leftFormat = CubeFormat::ND;
+        DataType leftDtype = DataType::DT_FLOAT;
+        bool isTransA = false;
+
+        TPosition rightPosition = TPosition::GM;
+        CubeFormat rightFormat = CubeFormat::ND;
+        DataType rightDtype = DataType::DT_FLOAT;
+        bool isTransB = false;
+
+        TPosition resultPosition = TPosition::GM;
+        CubeFormat resultFormat = CubeFormat::ND;
+        DataType resultDtype = DataType::DT_FLOAT;
+        bool isBias = false;
+        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
+        MatmulApiTiling tilingApi(*ascendcPlatform);
+        tilingApi.SetAType(leftPosition, leftFormat, leftDtype, isTransA);
+        tilingApi.SetBType(rightPosition, rightFormat, rightDtype, isTransB);
+        tilingApi.SetCType(resultPosition, resultFormat, resultDtype);
+        tilingApi.SetShape(1024, 1024, 1024);
+        tilingApi.SetOrgShape(1024, 1024, 1024);
+        tilingApi.SetBias(isBias);
+        tilingApi.SetBufferSpace(-1, -1, -1);
+        optiling::TCubeTiling tilingData;
+        int64_t ret = tilingApi.GetTiling(tilingData);
+        if (ret == -1)
+        {
+            std::cout << "gen TCubeTiling failed" << std::endl;
+        }
+        uint32_t tcubeTilingSize = tilingData.GetDataSize();
+        tilingData.SaveToBuffer(&tcubeTiling, tcubeTilingSize);
     }
 }
 int getTilingSize(int N, int svdBlockNum = 1)
@@ -47,6 +86,7 @@ void GenerateTiling(int N, int svdBlockNum, uint8_t *TilingHost)
     auto totolStackSize = N / 3 + 1;
     tiling->stackSize = totolStackSize;
     tiling->offset = getFirstStackElementOffset(svdBlockNum);
+    initTCubeTiling(tiling->matmultiling);
     SVDSubmatrixInfo *svdStack = reinterpret_cast<SVDSubmatrixInfo *>(TilingHost + getFirstStackElementOffset(svdBlockNum));
     auto remainder = N % 3;
     // remainder==0,N/3-1个2x3+1x2+1x1
