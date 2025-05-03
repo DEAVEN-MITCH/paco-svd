@@ -895,7 +895,7 @@ private:
     {
         // cache 问题，AIV处理前需刷新Cache
         // 如果m/n过小，并行初始化会带来cacheline覆盖问题。
-        //cacheline大小为64字节
+        // cacheline大小为64字节
         if (m_ < 16)
         {
             if (aivIdx == 0)

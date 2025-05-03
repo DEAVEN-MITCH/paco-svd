@@ -58,7 +58,7 @@ inline void PrintPartOfMatrix(uint8_t* matrix_raw, int rows, int cols, int m, in
             else {
                 value = *reinterpret_cast<float*>(&mat[i * cols + j]);
             }
-            printf("%d ", static_cast<int>(value));
+            printf("%f ", value);
         }
         printf("\n");
     }

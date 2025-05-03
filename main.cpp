@@ -15,7 +15,7 @@ extern void GenerateTiling(int N, int blockDim, uint8_t *TilingHost);
 int main(int argc, char **argv)
 {
     unsigned int deviceId, M, N;
-    deviceId = 0;
+    deviceId = 1;
     unsigned int bidiagonalizationBlockNum = 40, svdBlockNum = 1;
     std::ifstream args_file("../args.txt");
     std::string m_str, n_str;
@@ -128,9 +128,9 @@ int main(int argc, char **argv)
 
     std::cout << "finish bidiagonalization" << std::endl;
 
-    // CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
-    // CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(EArrayHost, EArrayFileSize, EArrayDevice, EArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(TauqArrayHost, TauqArrayFileSize, TauqArrayDevice, TauqArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
@@ -151,7 +151,8 @@ int main(int argc, char **argv)
 
     // std::cout << "[MATRIX B]" << std::endl;
     // PrintPartOfMatrix<float>(AMatrixHost, M, N, 8, 8);
-
+    // PrintPartOfMatrix<float>(UMatrixHost, M, M, 2, 2);
+    // PrintPartOfMatrix<float>(VtMatrixHost, N, N, 2, 2);
     ACLRT_LAUNCH_KERNEL(svd_DC)
     (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QMatrixDevice, WtMatrixDevice, idxDevice, workspaceDevice, TilingDevice);
 
@@ -161,6 +162,9 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMemcpy(UMatrixHost, UMatrixFileSize, UMatrixDevice, UMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(VtMatrixHost, VtMatrixFileSize, VtMatrixDevice, VtMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
+    // PrintPartOfMatrix<float>(AMatrixHost, M, N, 2, 2);
+
 
     {
         // 直接将D数组作为奇异值向量输出
