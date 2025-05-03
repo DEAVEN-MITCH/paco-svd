@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     size_t EArrayFileSize = (N - 1) * sizeof(float);
     size_t TauqArrayFileSize = N * sizeof(float);
     size_t TaupArrayFileSize = (N - 1) * sizeof(float);
-    size_t QMatrixFileSize = N * N * sizeof(float);
+    size_t QtMatrixFileSize = N * N * sizeof(float);
     size_t WtMatrixFileSize = N * N * sizeof(float);
     size_t TilingFileSize = getTilingSize(N, svdBlockNum);
     size_t idxFileSize = 16 * N * sizeof(uint32_t);
@@ -106,11 +106,11 @@ int main(int argc, char **argv)
     // CHECK_ACL(aclrtMallocHost((void **)(&TaupArrayHost), TaupArrayFileSize));
     CHECK_ACL(aclrtMalloc((void **)&TaupArrayDevice, TaupArrayFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    // uint8_t *QMatrixHost;
-    uint8_t *QMatrixDevice;
-    // CHECK_ACL(aclrtMallocHost((void **)(&QMatrixHost), QMatrixFileSize));
-    CHECK_ACL(aclrtMalloc((void **)&QMatrixDevice, QMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMemset(QMatrixDevice, QMatrixFileSize, 0, QMatrixFileSize));
+    // uint8_t *QtMatrixHost;
+    uint8_t *QtMatrixDevice;
+    // CHECK_ACL(aclrtMallocHost((void **)(&QtMatrixHost), QtMatrixFileSize));
+    CHECK_ACL(aclrtMalloc((void **)&QtMatrixDevice, QtMatrixFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMemset(QtMatrixDevice, QtMatrixFileSize, 0, QtMatrixFileSize));
 
     // uint8_t *WtMatrixHost;
     uint8_t *WtMatrixDevice;
@@ -154,7 +154,7 @@ int main(int argc, char **argv)
     // PrintPartOfMatrix<float>(UMatrixHost, M, M, 2, 2);
     // PrintPartOfMatrix<float>(VtMatrixHost, N, N, 2, 2);
     ACLRT_LAUNCH_KERNEL(svd_DC)
-    (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QMatrixDevice, WtMatrixDevice, idxDevice, workspaceDevice, TilingDevice);
+    (svdBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, QtMatrixDevice, WtMatrixDevice, idxDevice, workspaceDevice, TilingDevice);
 
     CHECK_ACL(aclrtSynchronizeStream(stream));
     std::cout << "finish" << std::endl;
@@ -187,8 +187,8 @@ int main(int argc, char **argv)
     // CHECK_ACL(aclrtFreeHost(TauqArrayHost));
     CHECK_ACL(aclrtFree(TaupArrayDevice));
     // CHECK_ACL(aclrtFreeHost(TaupArrayHost));
-    CHECK_ACL(aclrtFree(QMatrixDevice));
-    // CHECK_ACL(aclrtFreeHost(QMatrixHost));
+    CHECK_ACL(aclrtFree(QtMatrixDevice));
+    // CHECK_ACL(aclrtFreeHost(QtMatrixHost));
     CHECK_ACL(aclrtFree(WtMatrixDevice));
     // CHECK_ACL(aclrtFreeHost(WtMatrixHost));
     // CHECK_ACL(aclrtFree(TilingDevice));

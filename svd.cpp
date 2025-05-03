@@ -70,13 +70,16 @@ namespace
         *svdStack = tilingGM + tiling->offset;
         return;
     }
+    using BDCMatmulType = Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
+                              MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float, true>,
+                              MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>>;
 }
 template <bool ifVecTiling = false, bool ifParallel = false>
 class BDC
 {
 public:
     __aicore__ inline BDC() : blockIdx(AscendC::GetBlockIdx()), blockNum(AscendC::GetBlockNum()) {}
-    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe, Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>, MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>, MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>> &inputmm)
+    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR qt, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe,BDCMatmulType &inputmm)
     {
         NotParallelQuiter;
         ASSERT(M >= N && "M must be greater than or equal to N");
@@ -90,7 +93,7 @@ public:
         vtGm.SetGlobalBuffer((__gm__ float *)vt, N * N);
         dGm.SetGlobalBuffer((__gm__ float *)d, N);
         eGm.SetGlobalBuffer((__gm__ float *)e, N - 1);
-        qGm.SetGlobalBuffer((__gm__ float *)q, N * N);
+        qtGm.SetGlobalBuffer((__gm__ float *)qt, N * N);
         wtGm.SetGlobalBuffer((__gm__ float *)wt, N * N);
         idxqGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
@@ -109,7 +112,7 @@ public:
         {
             if (blockIdx == 0)
             {
-                compute_2x2_svd(qGm, wtGm, dGm, eGm, idxqGm);
+                compute_2x2_svd(qtGm, wtGm, dGm, eGm, idxqGm);
             }
             updateUVt();
 
@@ -119,7 +122,7 @@ public:
         {
             if (blockIdx == 0)
             {
-                compute_1x1_svd(qGm, wtGm, dGm, idxqGm);
+                compute_1x1_svd(qtGm, wtGm, dGm, idxqGm);
             }
             updateUVt();
 
@@ -174,7 +177,7 @@ private:
                 return;
             for (auto i = 0; i < LDN; i++)
             {
-                qGm(i * LDN + i) = 1.0f;
+                qtGm(i * LDN + i) = 1.0f;
                 wtGm(i * LDN + i) = 1.0f;
             }
         }
@@ -184,7 +187,7 @@ private:
 
             for (int32_t i = blockIdx; i < LDN; i += blockNum)
             {
-                qGm(i * LDN + i) = 1.0f;
+                qtGm(i * LDN + i) = 1.0f;
                 wtGm(i * LDN + i) = 1.0f;
             }
         }
@@ -199,7 +202,7 @@ private:
         // sort d and get another permutation
         // deflate z1
         // deflate z and d
-        // permute q and wt
+        // permute qt and wt
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
@@ -211,7 +214,7 @@ private:
         const auto idx_start = subMatrix.start_col;
         const auto colNum = subMatrix.end_col - idx_start + 1;
         const auto rowNum = subMatrix.end_col == LDN ? colNum : colNum - 1;
-        GlobalTensor<float> q = qGm[idx_start * LDN + idx_start];
+        GlobalTensor<float> qt = qtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> wt = wtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> d = dGm[idx_start];
         GlobalTensor<uint32_t> idxq = idxqGm[idx_start];
@@ -219,22 +222,22 @@ private:
         GlobalTensor<float> e = idx_start == LDN - 1 ? dGm[idx_start] : eGm[idx_start];
         if (colNum == 3)
         {
-            compute_2x3_svd(q, wt, d, e, idxq);
+            compute_2x3_svd(qt, wt, d, e, idxq);
         }
         else if (colNum == 2 && rowNum == 2)
         {
-            compute_2x2_svd(q, wt, d, e, idxq);
+            compute_2x2_svd(qt, wt, d, e, idxq);
         }
         else if (colNum == 2 && rowNum == 1)
         {
-            compute_1x2_svd(q, wt, d, e, idxq);
+            compute_1x2_svd(qt, wt, d, e, idxq);
         }
         else if (colNum == 1 && rowNum == 1)
         {
-            compute_1x1_svd(q, wt, d, idxq);
+            compute_1x1_svd(qt, wt, d, idxq);
         }
     }
-    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &q, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1), a23 = e(1);
         idxq(0) = 0;
@@ -252,10 +255,10 @@ private:
             float sq = sqrt(a22 * a22 + a23 * a23);
             d(0) = sq;
             d(1) = 0;
-            q(0) = 0;
-            q(1) = 1;
-            q(LDN) = 1;
-            q(LDN + 1) = 0;
+            qt(0) = 0;
+            qt(1) = 1;
+            qt(LDN) = 1;
+            qt(LDN + 1) = 0;
             wt(0) = 0;
             wt(1) = a22 / sq;
             wt(2) = a23 / sq;
@@ -273,7 +276,7 @@ private:
             float sq = sqrt(a11 * a11 + a12 * a12);
             d(0) = sq;
             d(1) = 0;
-            // q is unit
+            // qt is unit
             wt(0) = a11 / sq;
             wt(1) = a12 / sq;
             wt(LDN) = a12 / sq;
@@ -287,10 +290,10 @@ private:
             float sq = sqrt(a12 * a12 + a22 * a22);
             d(0) = sq;
             d(1) = 0;
-            q(0) = a12 / sq;
-            q(1) = a22 / sq;
-            q(LDN) = a22 / sq;
-            q(LDN + 1) = -a12 / sq;
+            qt(0) = a12 / sq;
+            qt(1) = a22 / sq;
+            qt(LDN) = a22 / sq;
+            qt(LDN + 1) = -a12 / sq;
             wt(0) = 0;
             wt(1) = 1;
             wt(LDN) = 1;
@@ -314,15 +317,15 @@ private:
             d(1) = sigma2;
             float u1 = sigma1 * sigma1 - m22, u2 = m12, v1 = a11 * u1, v2 = a12 * (sigma1 * sigma1 - a23 * a23), v3 = a12 * a22 * a23;
             float normu = sqrt(u1 * u1 + u2 * u2), normv = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
-            q(0) = u1 / normu;
-            q(LDN) = u2 / normu;
+            qt(0) = u1 / normu;
+            qt(1) = u2 / normu;
             wt(0) = v1 / normv;
             wt(1) = v2 / normv;
             wt(2) = v3 / normv;
             u1 = sigma2 * sigma2 - m22, v1 = a11 * u1, v2 = a12 * (sigma2 * sigma2 - a23 * a23);
             normu = sqrt(u1 * u1 + u2 * u2), normv = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
-            q(1) = u1 / normu;
-            q(LDN + 1) = u2 / normu;
+            qt(LDN) = u1 / normu;
+            qt(LDN + 1) = u2 / normu;
             wt(LDN) = v1 / normv;
             wt(LDN + 1) = v2 / normv;
             wt(LDN + 2) = v3 / normv;
@@ -333,7 +336,7 @@ private:
             wt(2 * LDN + 2) = v3 / normv;
         }
     }
-    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &q, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1);
 
@@ -344,8 +347,8 @@ private:
             // rank 0
             d(0) = 0;
             d(1) = 0;
-            // q(0) = 1.0f;
-            // q(LDN + 1) = 1.0f;
+            // qt(0) = 1.0f;
+            // qt(LDN + 1) = 1.0f;
             // wt(0) = 1.0f;
             // wt(LDN + 1) = 1.0f;
             return;
@@ -356,8 +359,8 @@ private:
             float sq = sqrt(a11 * a11 + a12 * a12);
             d(0) = sq;
             d(1) = 0;
-            // q(0) = 1.0f;
-            // q(LDN + 1) = 1.0f;
+            // qt(0) = 1.0f;
+            // qt(LDN + 1) = 1.0f;
             wt(0) = a11 / sq;
             wt(1) = a12 / sq;
             wt(LDN) = a12 / sq;
@@ -370,10 +373,10 @@ private:
             float sq = sqrt(a12 * a12 + a22 * a22);
             d(0) = sq;
             d(1) = 0;
-            q(0) = a12 / sq;
-            q(1) = a22 / sq;
-            q(LDN) = a22 / sq;
-            q(LDN + 1) = -a12 / sq;
+            qt(0) = a12 / sq;
+            qt(1) = a22 / sq;
+            qt(LDN) = a22 / sq;
+            qt(LDN + 1) = -a12 / sq;
             wt(0) = 0;
             wt(1) = 1;
             wt(LDN) = 1;
@@ -387,17 +390,17 @@ private:
             {
                 d(0) = fabs(a11);
                 d(1) = fabs(a22);
-                q(0) = sign(1.0f, a11);
-                q(LDN + 1) = sign(1.0f, a22);
+                qt(0) = sign(1.0f, a11);
+                qt(LDN + 1) = sign(1.0f, a22);
             }
             else
             {
                 d(0) = fabs(a22);
                 d(1) = fabs(a11);
-                q(0) = 0.0f;
-                q(1) = sign(1.0f, a11);
-                q(LDN) = sign(1.0f, a22);
-                q(LDN + 1) = 0.0f;
+                qt(0) = 0.0f;
+                qt(1) = sign(1.0f, a22);
+                qt(LDN) = sign(1.0f, a11);
+                qt(LDN + 1) = 0.0f;
                 wt(0) = 0.0f;
                 wt(1) = 1.0f;
                 wt(LDN) = 1.0f;
@@ -423,24 +426,24 @@ private:
             float normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
             wt(0) = v1 / normv;
             wt(1) = v2 / normv;
-            q(0) = u1 / normu;
-            q(LDN) = u2 / normu;
+            qt(0) = u1 / normu;
+            qt(1) = u2 / normu;
             v1 = sigma2 * sigma2 - a12 * a12 - m22, u1 = sigma2 * sigma2 - m22;
             normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
             wt(LDN) = v1 / normv;
             wt(LDN + 1) = v2 / normv;
-            q(1) = u1 / normu;
-            q(LDN + 1) = u2 / normu;
+            qt(LDN) = u1 / normu;
+            qt(LDN + 1) = u2 / normu;
             return;
         }
     }
-    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &q, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
     {
         float a11 = d(0), a12 = e(0);
         float sq = sqrt(a11 * a11 + a12 * a12);
         idxq(0) = 0;
         d(0) = sq;
-        // q(0) = 1.0f;
+        // qt(0) = 1.0f;
         if (sq == 0)
         {
             // wt(0) = 1.0f;
@@ -458,11 +461,11 @@ private:
             return;
         }
     }
-    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &q, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint32_t> &idxq)
     {
         idxq(0) = 0;
         float a11 = d(0);
-        q(0) = sign(1.0f, a11);
+        qt(0) = sign(1.0f, a11);
         d(0) = fabs(a11);
         // wt(0) = 1.0f;
         // no need to set w to 1.0f because it initializes to unit matrix
@@ -482,7 +485,7 @@ private:
         printf("before updateUVt\n");
         singleDumpTensor(uGm, 16);
         singleDumpTensor(vtGm, 16);
-        singleDumpTensor(qGm, 16);
+        singleDumpTensor(qtGm, 16);
         singleDumpTensor(wtGm, 16);
 
         mm->SetOrgShape(LDM, LDN, LDM, LDN);
@@ -491,7 +494,7 @@ private:
         printf("after setSingleShape\n");
         mm->SetTensorA(uGm);
         printf("after setTensorA\n");
-        mm->SetTensorB(qGm);
+        mm->SetTensorB(qtGm, true);
         printf("after setTensorB\n");
         mm->IterateAll(tmpGm);
         printf("after iterateAll\n");
@@ -506,7 +509,7 @@ private:
         singleDumpTensor(wtGm, 16);
         singleDumpTensor(vtGm, 16);
 
-        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(tmpGm);
+        // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(tmpGm);
         printf("before copyMatrix\n");
         singleDumpTensor(tmpGm, 16);
         singleDumpTensor(uGm, 16);
@@ -532,7 +535,7 @@ private:
         printf("before DataCacheCleanAndInvalid\n");
         singleDumpTensor(tmpGm, 16);
 
-        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         // Copy tmpGm to vtGm
         printf("before copyMatrix\n");
         singleDumpTensor(tmpGm, 16);
@@ -576,16 +579,14 @@ private:
 private:
     uint16_t LDM, LDN;
     // in the beginning u and vt are orthogonal matrix, generated by bidiagonalization
-    // q and wt are orthogonal matrix, generated by BDC
+    // qt and wt are orthogonal matrix, generated by BDC
     // altogether,the singular matrix are uq,wtvt which
     // would in the end be stored in uGm and vtGm
     // d would be used to store singular values,and e would store the intermediate z;
-    GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qGm, wtGm;
+    GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qtGm, wtGm;
     GlobalTensor<uint32_t> idxqGm;
     GlobalTensor<uint16_t> svdStackGm;
-    Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>> *mm;
+    BDCMatmulType *mm;
     const uint8_t blockIdx, blockNum;
     TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
     TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
@@ -594,20 +595,17 @@ private:
     SVDTiling *svdTiling;
 };
 
-extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, GM_ADDR tilingGM)
+extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR qt, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, GM_ADDR tilingGM)
 {
     TPipe pipe;
     SVDTiling tiling;
     GM_ADDR svdStack;
     CopyTiling(&tiling, &svdStack, tilingGM);
-    Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>>
-        mm;
+    BDCMatmulType mm;
     REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tiling.matmultiling); // Initialize the matmul object.
 #ifdef __DAV_C220_VEC__
     BDC bdc;
-    bdc.init(M, N, a, u, vt, d, e, q, wt, idx, svdStack, workspace, &tiling, pipe, mm);
+    bdc.init(M, N, a, u, vt, d, e, qt, wt, idx, svdStack, workspace, &tiling, pipe, mm);
     bdc.Process();
 #endif
     // for (int len = 1; len <= length; len *= 2)
