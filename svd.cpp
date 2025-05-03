@@ -1,6 +1,21 @@
 #include "kernel_operator.h"
 #include <lib/matmul_intf.h>
 
+#define NotParallelQuiter      \
+    if constexpr (!ifParallel) \
+    {                          \
+        if (blockIdx != 0)     \
+        {                      \
+            return;            \
+        }                      \
+    }
+#define singleDumpTensor(tensor, tensorNum)      \
+    if (blockIdx == 0)                           \
+    {                                            \
+        printf("dump" #tensor "\n");             \
+        DumpTensor(tensor, __LINE__, tensorNum); \
+    }
+
 constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
 constexpr float EPS = 1e-6;
 constexpr uint32_t sizeOfFloat = sizeof(float);
@@ -61,20 +76,14 @@ class BDC
 {
 public:
     __aicore__ inline BDC() : blockIdx(AscendC::GetBlockIdx()), blockNum(AscendC::GetBlockNum()) {}
-    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe)
+    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe, Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>, MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>, MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>> &inputmm)
     {
-        if constexpr (!ifParallel)
-        {
-            if (blockIdx != 0)
-            {
-                return;
-            }
-        }
+        NotParallelQuiter;
         ASSERT(M >= N && "M must be greater than or equal to N");
         LDM = M;
         LDN = N;
         svdTiling = tiling;
-        REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tiling->matmultiling);
+        mm = &inputmm;
         svdStackGm.SetGlobalBuffer((__gm__ uint16_t *)svdStack, tiling->stackSize);
         tmpGm.SetGlobalBuffer((__gm__ float *)a, M * N);
         uGm.SetGlobalBuffer((__gm__ float *)u, M * M);
@@ -92,54 +101,36 @@ public:
     }
     __aicore__ inline void Process()
     {
-        if constexpr (!ifParallel)
-        {
-            if ASCEND_IS_AIC
-            {
-                if (blockIdx != 0)
-                {
-                    return;
-                }
-            }
-            if ASCEND_IS_AIV
-            {
-                if (blockIdx > 1)
-                {
-                    return;
-                }
-            }
-        }
+        NotParallelQuiter;
         // reduction requires rotation in the end,may not be worth it
         // simply no reduction ,as sbdsdc does
         initQWt();
         if (LDN == 2)
         {
-            if ASCEND_IS_AIV
-                if (blockIdx == 0)
-                {
-                    compute_2x2_svd(qGm, wtGm, dGm, eGm, idxqGm);
-                }
+            if (blockIdx == 0)
+            {
+                compute_2x2_svd(qGm, wtGm, dGm, eGm, idxqGm);
+            }
             updateUVt();
 
             return;
         }
         else if (LDN == 1)
         {
-            if ASCEND_IS_AIV
-                if (blockIdx == 0)
-                {
-                    compute_1x1_svd(qGm, wtGm, dGm, idxqGm);
-                }
+            if (blockIdx == 0)
+            {
+                compute_1x1_svd(qGm, wtGm, dGm, idxqGm);
+            }
             updateUVt();
 
             return;
         }
+        printf("not terminate early,LDN:%d,g_coreType==AIV:%d\n,blockIdx:%d\n", LDN, g_coreType == AIV, blockIdx);
         uint16_t stackSize = svdTiling->stackSize;
         // init leaf node
         for (auto i = 0; i < stackSize; i++)
         {
-            if ASCEND_IS_AIV
-                compute_base_case_svd(getSVDSubmatrixInfo(i));
+            compute_base_case_svd(getSVDSubmatrixInfo(i));
         }
         // merge
         while (stackSize != 1)
@@ -174,7 +165,6 @@ public:
 private:
     __aicore__ inline void initQWt()
     {
-#ifdef __DAV_C220_VEC__
         // use aiv's scalars only
         //  初始化q和wt为单位矩阵
         if constexpr (!ifParallel)
@@ -198,7 +188,6 @@ private:
                 wtGm(i * LDN + i) = 1.0f;
             }
         }
-#endif
     }
 
     __aicore__ inline void MergeSubMatrix(const SVDSubmatrixInfo &leftSubMatrix, const SVDSubmatrixInfo &rightSubMatrix)
@@ -485,61 +474,77 @@ private:
 
     __aicore__ inline void updateUVt()
     {
+        NotParallelQuiter;
         // update UVt from Q Wt
         // LDN columns of U  are updated
         // all rows of Vt are updated
-        if ASCEND_IS_AIV
-        {
-            CrossCoreSetFlag<0x2, PIPE_MTE3>(0x0);
-        }
-        if ASCEND_IS_AIC
-        {
-            CrossCoreWaitFlag(0x0);
-        }
-        mm.SetOrgShape(LDM, LDN, LDM, LDN);
-        mm.SetSingleShape(LDM, LDN, LDN);
-        mm.SetTensorA(uGm);
-        mm.SetTensorB(qGm);
-        mm.IterateAll(tmpGm);
-        mm.End();
-        if ASCEND_IS_AIC
-        {
-            CrossCoreSetFlag<0x2, PIPE_FIX>(0x1);
-        }
-        if ASCEND_IS_AIV
-        {
-            CrossCoreWaitFlag(0x1);
-        }
+        AscendC ::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        printf("before updateUVt\n");
+        singleDumpTensor(uGm, 16);
+        singleDumpTensor(vtGm, 16);
+        singleDumpTensor(qGm, 16);
+        singleDumpTensor(wtGm, 16);
+
+        mm->SetOrgShape(LDM, LDN, LDM, LDN);
+        printf("after setOrgShape\n");
+        mm->SetSingleShape(LDM, LDN, LDN);
+        printf("after setSingleShape\n");
+        mm->SetTensorA(uGm);
+        printf("after setTensorA\n");
+        mm->SetTensorB(qGm);
+        printf("after setTensorB\n");
+        mm->IterateAll(tmpGm);
+        printf("after iterateAll\n");
+        // printf("%f %f %f %f\n", tmpGm(0), tmpGm(1), tmpGm(2), tmpGm(3));
+
+        // mm->End();
+        // printf("after end\n");
         // Copy tmpGm to uGm
+        printf("before cache refresh\n");
+        singleDumpTensor(tmpGm, 16);
+        singleDumpTensor(uGm, 16);
+        singleDumpTensor(wtGm, 16);
+        singleDumpTensor(vtGm, 16);
+
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(tmpGm);
+        printf("before copyMatrix\n");
+        singleDumpTensor(tmpGm, 16);
+        singleDumpTensor(uGm, 16);
+        singleDumpTensor(wtGm, 16);
+        singleDumpTensor(vtGm, 16);
+
         CopyMatrix(tmpGm, uGm, LDN, LDM, LDM, LDN);
-        if ASCEND_IS_AIV
-        {
-            CrossCoreSetFlag<0x2, PIPE_MTE3>(0x0);
-        }
-        if ASCEND_IS_AIC
-        {
-            CrossCoreWaitFlag(0x0);
-        }
-        mm.SetOrgShape(LDN, LDN, LDN, LDN);
-        mm.SetSingleShape(LDN, LDN, LDN);
-        mm.SetTensorA(wtGm);
-        mm.SetTensorB(vtGm);
-        mm.IterateAll(tmpGm);
-        mm.End();
-        if ASCEND_IS_AIC
-        {
-            CrossCoreSetFlag<0x2, PIPE_FIX>(0x1);
-        }
-        if ASCEND_IS_AIV
-        {
-            CrossCoreWaitFlag(0x1);
-        }
+
+        printf("after copyMatrix\n");
+        singleDumpTensor(uGm, 16);
+        printf("after updateU\n");
+        printf("before updateVt\n");
+        singleDumpTensor(wtGm, 16);
+        singleDumpTensor(vtGm, 16);
+
+        mm->SetOrgShape(LDN, LDN, LDN, LDN);
+        mm->SetSingleShape(LDN, LDN, LDN);
+        mm->SetTensorA(wtGm);
+        mm->SetTensorB(vtGm);
+        mm->IterateAll(tmpGm);
+        mm->End();
+        printf("after end\n");
+        printf("before DataCacheCleanAndInvalid\n");
+        singleDumpTensor(tmpGm, 16);
+
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         // Copy tmpGm to vtGm
+        printf("before copyMatrix\n");
+        singleDumpTensor(tmpGm, 16);
         CopyMatrix(tmpGm, vtGm, LDN, LDN, LDN, LDN);
+        printf("after updateVt\n");
+        singleDumpTensor(vtGm, 16);
+
         return;
     }
     __aicore__ inline void CopyMatrix(GlobalTensor<float> &src, GlobalTensor<float> &dst, uint16_t src_n, uint16_t dst_n, uint16_t copyM, uint16_t copyN)
     {
+        NotParallelQuiter;
         const uint8_t padLen = copyN % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - copyN % BlockFloatCnt;
         const uint32_t ttl = copyN + padLen;
         DataCopyExtParams copyInParams = {1, copyN * sizeOfFloat, 0, 0, 0};
@@ -564,20 +569,6 @@ private:
     }
     __aicore__ inline void setSVDSubmatrixInfo(uint16_t idx, SVDSubmatrixInfo info)
     {
-        // wait for aic to finish reading,then writing
-        if ASCEND_IS_AIC
-        {
-            CrossCoreSetFlag<0x2, PIPE_FIX>(0x1);
-        }
-        if ASCEND_IS_AIV
-        {
-            CrossCoreWaitFlag(0x1);
-        }
-
-        if ASCEND_IS_NOT_AIV
-        {
-            return;
-        }
         svdStackGm(2 * idx) = info.start_col;
         svdStackGm(2 * idx + 1) = info.end_col;
     }
@@ -592,13 +583,9 @@ private:
     GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qGm, wtGm;
     GlobalTensor<uint32_t> idxqGm;
     GlobalTensor<uint16_t> svdStackGm;
-    static constexpr MatmulConfig MDL = GetMDLConfig(false, false, 2, false, false, false, true);
     Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
            MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-           MDL>
-        mm;
+           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>> *mm;
     const uint8_t blockIdx, blockNum;
     TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
     TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
@@ -610,12 +597,19 @@ private:
 extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR q, GM_ADDR wt, GM_ADDR idx, GM_ADDR workspace, GM_ADDR tilingGM)
 {
     TPipe pipe;
-    BDC bdc;
     SVDTiling tiling;
     GM_ADDR svdStack;
     CopyTiling(&tiling, &svdStack, tilingGM);
-    bdc.init(M, N, a, u, vt, d, e, q, wt, idx, svdStack, workspace, &tiling, pipe);
+    Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>>
+        mm;
+    REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tiling.matmultiling); // Initialize the matmul object.
+#ifdef __DAV_C220_VEC__
+    BDC bdc;
+    bdc.init(M, N, a, u, vt, d, e, q, wt, idx, svdStack, workspace, &tiling, pipe, mm);
     bdc.Process();
+#endif
     // for (int len = 1; len <= length; len *= 2)
     // {
     //     for (int l1 = st; l1 <= ed; l1 += 2 * len)

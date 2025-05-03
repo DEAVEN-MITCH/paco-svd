@@ -108,7 +108,10 @@ def verify_svd_result(output_dir, M, N):
     print("\n--- Debug Information ---")
     print(f"Singular values (ours): {s[:min(5,N)]}")
     print(f"Singular values (ref):  {s_ref[:min(5,N)]}")
-    
+    print(f"U: {U}")
+    print(f"Vt: {Vt}")
+    print(f"A: {A}")
+    print(f"A_rec: {A_rec}")
     # 总结
     print("\n--- Verification Summary ---")
     print(f"1. U Orthogonality:          {'PASSED' if u_ortho else 'FAILED'}")
