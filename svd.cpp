@@ -508,16 +508,62 @@ private:
                 inQueue.FreeTensor(indexTensor);
 
                 outputTensor = outQueue.DeQue<float>();
-                DataCopyPad(d, outputTensor, copyOutParamsf);
+                DataCopyPad(d[1], outputTensor, copyOutParamsf);
                 outQueue.FreeTensor(outputTensor);
 
                 outputIndexTensor = outQueue.DeQue<uint32_t>();
-                DataCopyPad(idx, outputIndexTensor, copyOutParamsi);
+                DataCopyPad(idx[1], outputIndexTensor, copyOutParamsi);
+                outQueue.FreeTensor(outputIndexTensor);
             }
         }
 
-
+        // use idx to permute d z and coltype.d has been permuted
         {
+            const DataCopyExtParams copyInParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+            indexTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(indexTensor, idx[1], copyInParamsi, copyInPadParamsi);
+            inQueue.EnQue(indexTensor);
+
+            indexTensor = inQueue.DeQue<uint32_t>();
+            Muls(indexTensor, indexTensor, sizeOfFloat, dNum);
+
+            // permute z
+            const DataCopyExtParams copyInParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+            inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, leftSingularMatrix, copyInParamsf, copyInPadParamsf);
+            inQueue.EnQue(inputTensor);
+
+            inputTensor = inQueue.DeQue<float>();
+            outputTensor = outQueue.AllocTensor<float>();
+            Gather(outputTensor, inputTensor, indexTensor, 0, dNum);
+            outQueue.EnQue(outputTensor);
+            inQueue.FreeTensor(inputTensor);
+
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(z[1], outputTensor, copyOutParamsf);
+            outQueue.FreeTensor(outputTensor);
+
+            // permute coltyp
+            const DataCopyExtParams copyOutParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            auto coltypTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(coltypTensor, idxc, copyInParamsi, copyInPadParamsi);
+            inQueue.EnQue(coltypTensor);
+
+            coltypTensor = inQueue.DeQue<uint32_t>();
+            auto outColtypTensor = outQueue.AllocTensor<uint32_t>();
+            Gather(outColtypTensor, coltypTensor, indexTensor, 0, dNum);
+            outQueue.EnQue(outColtypTensor);
+            inQueue.FreeTensor(coltypTensor);
+
+            outColtypTensor = outQueue.DeQue<uint32_t>();
+            DataCopyPad(coltyp[1], outColtypTensor, copyOutParamsi);
+            outQueue.FreeTensor(outColtypTensor);
+
+            // 释放 indexTensor
+            inQueue.FreeTensor(indexTensor);
         }
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
@@ -804,7 +850,7 @@ private:
         // update UVt from Q Wt
         // LDN columns of U  are updated
         // all rows of Vt are updated
-        AscendC ::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         printf("before updateUVt\n");
         singleDumpTensor(uGm, 1024);
         singleDumpTensor(vtGm, 1024);
