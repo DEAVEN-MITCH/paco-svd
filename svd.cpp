@@ -97,7 +97,7 @@ public:
         wtGm.SetGlobalBuffer((__gm__ float *)wt, N * N);
         stGm.SetGlobalBuffer((__gm__ float *)(qt + sizeOfFloat * N * N), N);
         gtGm.SetGlobalBuffer((__gm__ float *)(wt + sizeOfFloat * N * N), N);
-        idxqGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idxqGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         idx += N * sizeOfFloat;
         fGm.SetGlobalBuffer((__gm__ float *)idx, N);
         idx += N * sizeOfFloat;
@@ -105,19 +105,21 @@ public:
         idx += N * sizeOfFloat;
         sigmaGm.SetGlobalBuffer((__gm__ float *)idx, N);
         idx += N * sizeOfFloat;
-        idxpGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idxpGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         idx += N * sizeOfFloat;
-        idxGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idxGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         idx += N * sizeOfFloat;
-        idxcGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idxcGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         idx += N * sizeOfFloat;
-        coltypGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        coltypGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
         idx += N * sizeOfFloat;
         zGm.SetGlobalBuffer((__gm__ float *)idx, N);
+        idx += N * sizeOfFloat;
+        dsigmaGm.SetGlobalBuffer((__gm__ float *)idx, N);
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(inQueue, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(outQueue, BUFFER_NUM, N * sizeOfFloat + 32);
-
+        pipe.InitBuffer(tmpBuf, 8*N);//for sort 
         // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
         // workspace = workspaceBuf.Get<int32_t>();
@@ -235,16 +237,16 @@ private:
         auto idxc = idxcGm[leftSubMatrix.start_col];
         auto idxp = idxpGm[leftSubMatrix.start_col];
         auto coltyp = coltypGm[leftSubMatrix.start_col];
+        auto dsigma = dsigmaGm[leftSubMatrix.start_col];
         // TODO scale for stability
 
-        // form d and z
         // rotate to remove the N+1 column if necessary
         // get idxq
         // sort d and get another permutation
         // deflate z1
         // deflate z and d
         // permute qt and wt
-        Deflation(leftColNum, rightColNum, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, coltyp);
+        Deflation(leftColNum - 1, rightColNum - 1 + isSquare, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, coltyp, dsigma);
 
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
@@ -252,12 +254,132 @@ private:
         return;
     }
 
-    __aicore__ inline void Deflation(uint16_t leftColNum, uint16_t rightColNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint16_t> &idxq, GlobalTensor<uint16_t> &idxc, GlobalTensor<uint16_t> &idxp, GlobalTensor<uint16_t> &coltyp)
+    __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
     {
-        float addedRowNo = leftColNum;
+        const uint16_t totolRowNum = leftRowNum + rightRowNum, totolColNum = totolRowNum + isSquare;
+        const uint16_t leftRowNump1 = leftRowNum + 1;
+        const uint16_t leftRowNump2 = leftRowNum + 2;
+        const uint16_t rightColNum = rightRowNum + 1 - isSquare;
+        DataCopyExtParams copyInParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
+        DataCopyExtParams copyOutParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
+        DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+        DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+        // form d and z
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
 
-        float z1 = alpha * l(leftColNum - 1);
+        // the first part
+        // the first part of z is (lamba,l[0:leftRowNum])*alpha
+        float lambda1 = l(leftRowNum);
+        copyInPadParamsf.paddingValue = lambda1;
+        copyInPadParamsf.leftPadding = 1;
+        copyOutParams.blockLen = leftRowNump1 * sizeOfFloat;
+        auto inputTensor = inQueue.AllocTensor<float>();
+        DataCopyPad(inputTensor, l, copyInParams, copyInPadParamsf);
+        inQueue.EnQue(inputTensor);
 
+        inputTensor = inQueue.DeQue<float>();
+        auto outputTensor = outQueue.AllocTensor<float>();
+        Muls(outputTensor, inputTensor, alpha, leftRowNump1);
+        inQueue.FreeTensor(inputTensor);
+        outQueue.EnQue(outputTensor);
+
+        outputTensor = outQueue.DeQue<float>();
+        DataCopyPad(z, outputTensor, copyOutParams);
+        outQueue.FreeTensor(outputTensor);
+
+        // shift the first part of d right by 1,d[i+1] = d[i]
+        copyInPadParamsf.paddingValue = 0.0f;
+        auto bindLocalf = copyBind.AllocTensor<float>();
+        DataCopyPad(bindLocalf, d, copyInParams, copyInPadParamsf);
+        copyBind.EnQue(bindLocalf);
+        bindLocalf = copyBind.DeQue<float>();
+        DataCopyPad(d, bindLocalf, copyOutParams);
+        copyBind.FreeTensor(bindLocalf);
+
+        // construct the first part of idxq ,idxq[i+1] = idxq[i]+1
+        copyInParams.blockLen = leftRowNum * sizeof(uint32_t);
+        copyOutParams.blockLen = leftRowNum * sizeof(uint32_t);
+        auto indexTensor = inQueue.AllocTensor<uint32_t>();
+        DataCopyPad(indexTensor, idxq, copyInParams, copyInPadParamsi);
+        inQueue.EnQue(indexTensor);
+
+        indexTensor = inQueue.DeQue<uint32_t>();
+        auto outIndexTensor = outQueue.AllocTensor<uint32_t>();
+        Adds(outIndexTensor, indexTensor, 1, leftRowNump1);
+        inQueue.FreeTensor(indexTensor);
+        outQueue.EnQue(outIndexTensor);
+
+        outIndexTensor = outQueue.DeQue<uint32_t>();
+        DataCopyPad(idxq[1], outIndexTensor, copyOutParams);
+        outQueue.FreeTensor(outIndexTensor);
+
+        // the second part of d z and idxq
+        // z[i]=l[i]*beta
+        // leftRowNump1 is also the shift of the second part
+        copyInPadParamsf.leftPadding = 0;
+        copyInParams.blockLen = rightColNum * sizeOfFloat;
+        copyOutParams.blockLen = rightColNum * sizeOfFloat;
+        inputTensor = inQueue.AllocTensor<float>();
+        DataCopyPad(inputTensor, l[leftRowNump1], copyInParams, copyInPadParamsf);
+        inQueue.EnQue(inputTensor);
+
+        inputTensor = inQueue.DeQue<float>();
+        outputTensor = outQueue.AllocTensor<float>();
+        Muls(outputTensor, inputTensor, beta, rightColNum);
+        inQueue.FreeTensor(inputTensor);
+        outQueue.EnQue(outputTensor);
+
+        outputTensor = outQueue.DeQue<float>();
+        DataCopyPad(z[leftRowNump1], outputTensor, copyOutParams);
+        outQueue.FreeTensor(outputTensor);
+
+        // no need to shift d.construct the second part of idxq
+        copyInParams.blockLen = rightRowNum * sizeof(uint32_t);
+        copyOutParams.blockLen = rightRowNum * sizeof(uint32_t);
+        indexTensor = inQueue.AllocTensor<uint32_t>();
+        DataCopyPad(indexTensor, idxq[leftRowNump1], copyInParams, copyInPadParamsi);
+        inQueue.EnQue(indexTensor);
+
+        indexTensor = inQueue.DeQue<uint32_t>();
+        outIndexTensor = outQueue.AllocTensor<uint32_t>();
+        Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
+        inQueue.FreeTensor(indexTensor);
+        outQueue.EnQue(outIndexTensor);
+
+        outIndexTensor = outQueue.DeQue<uint32_t>();
+        DataCopyPad(idxq[leftRowNump1], outIndexTensor, copyOutParams);
+        outQueue.FreeTensor(outIndexTensor);
+
+        // init coltype,0 and 1
+        copyOutParams.blockLen = leftRowNum * sizeof(uint32_t);
+        outIndexTensor = outQueue.AllocTensor<uint32_t>();
+        Duplicate<uint32_t>(outIndexTensor, 0, leftRowNum);
+        outQueue.EnQue(outIndexTensor);
+
+        outIndexTensor = outQueue.DeQue<uint32_t>();
+        DataCopyPad(coltyp[1], outIndexTensor, copyOutParams);
+        outQueue.FreeTensor(outIndexTensor);
+
+        copyOutParams.blockLen = rightRowNum * sizeof(uint32_t);
+        outIndexTensor = outQueue.AllocTensor<uint32_t>();
+        Duplicate<uint32_t>(outIndexTensor, 1, rightRowNum);
+        outQueue.EnQue(outIndexTensor);
+
+        outIndexTensor = outQueue.DeQue<uint32_t>();
+        DataCopyPad(coltyp[leftRowNump1], outIndexTensor, copyOutParams);
+        outQueue.FreeTensor(outIndexTensor);
+
+        //init tmp 
+        copyInParams.blockLen = totolRowNum * sizeof(uint32_t);
+        indexTensor = inQueue.AllocTensor<uint32_t>();
+        DataCopyPad(indexTensor, idxq[1], copyInParams, copyInPadParamsi);
+        inQueue.EnQue(indexTensor);
+        inputTensor = inQueue.AllocTensor<float>();
+
+        indexTensor = inQueue.DeQue<uint32_t>();
+        outIndexTensor = outQueue.AllocTensor<uint32_t>();
+        Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
+        inQueue.FreeTensor(indexTensor);
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
     {
@@ -272,7 +394,7 @@ private:
         GlobalTensor<float> qt = qtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> wt = wtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> d = dGm[idx_start];
-        GlobalTensor<uint16_t> idxq = idxqGm[idx_start];
+        GlobalTensor<uint32_t> idxq = idxqGm[idx_start];
         GlobalTensor<float> f = fGm[idx_start];
         GlobalTensor<float> l = lGm[idx_start];
         // allow e to be valid in case 1x1
@@ -294,7 +416,7 @@ private:
             compute_1x1_svd(qt, wt, d, idxq, f, l);
         }
     }
-    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
+    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1), a23 = e(1);
         idxq(0) = 0;
@@ -394,7 +516,7 @@ private:
         l(1) = wt(2 + LDN);
         l(2) = wt(2 * LDN + 2);
     }
-    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
+    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1);
 
@@ -495,7 +617,7 @@ private:
         l(0) = wt(1);
         l(1) = wt(1 + LDN);
     }
-    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
+    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0);
         float sq = sqrt(a11 * a11 + a12 * a12);
@@ -521,7 +643,7 @@ private:
         l(0) = wt(1);
         l(1) = wt(1 + LDN);
     }
-    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
+    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint32_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         idxq(0) = 0;
         float a11 = d(0);
@@ -618,13 +740,13 @@ private:
 
         for (int i = 0; i < copyM; i++)
         {
-            auto bindLocal = copyBind.AllocTensor<float>();
-            DataCopyPad(bindLocal, src[i * src_n], copyInParams, copyInPadParams);
-            copyBind.EnQue(bindLocal);
+            auto bindLocalf = copyBind.AllocTensor<float>();
+            DataCopyPad(bindLocalf, src[i * src_n], copyInParams, copyInPadParams);
+            copyBind.EnQue(bindLocalf);
 
-            bindLocal = copyBind.DeQue<float>();
-            DataCopyPad(dst[i * dst_n], bindLocal, copyOutParams);
-            copyBind.FreeTensor(bindLocal);
+            bindLocalf = copyBind.DeQue<float>();
+            DataCopyPad(dst[i * dst_n], bindLocalf, copyOutParams);
+            copyBind.FreeTensor(bindLocalf);
         }
     }
 
@@ -647,18 +769,19 @@ private:
     // d would be used to store singular values,and e would store the intermediate z;
     GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qtGm, wtGm;
     GlobalTensor<float> stGm, gtGm, fGm, lGm;
-    GlobalTensor<uint16_t> idxqGm;
-    GlobalTensor<float> sigmaGm, zGm;
-    GlobalTensor<uint16_t> idxpGm;
-    GlobalTensor<uint16_t> idxGm;
-    GlobalTensor<uint16_t> idxcGm;
-    GlobalTensor<uint16_t> coltypGm;
+    GlobalTensor<uint32_t> idxqGm;
+    GlobalTensor<float> sigmaGm, zGm, dsigmaGm;
+    GlobalTensor<uint32_t> idxpGm;
+    GlobalTensor<uint32_t> idxGm;
+    GlobalTensor<uint32_t> idxcGm;
+    GlobalTensor<uint32_t> coltypGm;
 
     GlobalTensor<uint16_t> svdStackGm;
     BDCMatmulType *mm;
     const uint8_t blockIdx, blockNum;
     TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
     TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
+    TBuf<TPosition::VECCALC> tmpBuf;
     TQueBind<TPosition::VECIN, TPosition::VECOUT, BUFFER_NUM> copyBind;
     // TBuf<TPosition::VECCALC> svdWorkspaceBuf;
     SVDTiling *svdTiling;
