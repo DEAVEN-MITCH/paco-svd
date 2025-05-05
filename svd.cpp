@@ -119,7 +119,7 @@ public:
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(inQueue, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(outQueue, BUFFER_NUM, N * sizeOfFloat + 32);
-        pipe.InitBuffer(tmpBuf, 8*N);//for sort 
+        pipe.InitBuffer(tmpBuf, 16 * N); // for sort
         // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
         // workspace = workspaceBuf.Get<int32_t>();
@@ -256,130 +256,269 @@ private:
 
     __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
     {
-        const uint16_t totolRowNum = leftRowNum + rightRowNum, totolColNum = totolRowNum + isSquare;
+        const uint16_t totolRowNum = leftRowNum + rightRowNum + 1, totolColNum = totolRowNum + isSquare, dNum = totolRowNum - 1;
         const uint16_t leftRowNump1 = leftRowNum + 1;
         const uint16_t leftRowNump2 = leftRowNum + 2;
         const uint16_t rightColNum = rightRowNum + 1 - isSquare;
-        DataCopyExtParams copyInParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
-        DataCopyExtParams copyOutParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
-        DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
-        DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
         // form d and z
         AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        LocalTensor<float> inputTensor, outputTensor, bindLocalf;
+        LocalTensor<uint32_t> indexTensor, outIndexTensor;
 
         // the first part
         // the first part of z is (lamba,l[0:leftRowNum])*alpha
-        float lambda1 = l(leftRowNum);
-        copyInPadParamsf.paddingValue = lambda1;
-        copyInPadParamsf.leftPadding = 1;
-        copyOutParams.blockLen = leftRowNump1 * sizeOfFloat;
-        auto inputTensor = inQueue.AllocTensor<float>();
-        DataCopyPad(inputTensor, l, copyInParams, copyInPadParamsf);
-        inQueue.EnQue(inputTensor);
+        {
+            const float lambda1 = l(leftRowNum);
+            const DataCopyExtParams copyInParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, leftRowNump1 * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 1, 0, lambda1};
+            inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, l, copyInParams, copyInPadParams);
+            inQueue.EnQue(inputTensor);
 
-        inputTensor = inQueue.DeQue<float>();
-        auto outputTensor = outQueue.AllocTensor<float>();
-        Muls(outputTensor, inputTensor, alpha, leftRowNump1);
-        inQueue.FreeTensor(inputTensor);
-        outQueue.EnQue(outputTensor);
+            inputTensor = inQueue.DeQue<float>();
+            outputTensor = outQueue.AllocTensor<float>();
+            Muls(outputTensor, inputTensor, alpha, leftRowNump1);
+            inQueue.FreeTensor(inputTensor);
+            outQueue.EnQue(outputTensor);
 
-        outputTensor = outQueue.DeQue<float>();
-        DataCopyPad(z, outputTensor, copyOutParams);
-        outQueue.FreeTensor(outputTensor);
-
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(z, outputTensor, copyOutParams);
+            outQueue.FreeTensor(outputTensor);
+        }
         // shift the first part of d right by 1,d[i+1] = d[i]
-        copyInPadParamsf.paddingValue = 0.0f;
-        auto bindLocalf = copyBind.AllocTensor<float>();
-        DataCopyPad(bindLocalf, d, copyInParams, copyInPadParamsf);
-        copyBind.EnQue(bindLocalf);
-        bindLocalf = copyBind.DeQue<float>();
-        DataCopyPad(d, bindLocalf, copyOutParams);
-        copyBind.FreeTensor(bindLocalf);
+        {
+            const DataCopyExtParams copyInParams = {1, leftRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, leftRowNump1 * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 1, 0, 0.0f};
+            bindLocalf = copyBind.AllocTensor<float>();
+            DataCopyPad(bindLocalf, d, copyInParams, copyInPadParams);
+            copyBind.EnQue(bindLocalf);
+            bindLocalf = copyBind.DeQue<float>();
+            DataCopyPad(d, bindLocalf, copyOutParams);
+            copyBind.FreeTensor(bindLocalf);
+        }
 
         // construct the first part of idxq ,idxq[i+1] = idxq[i]+1
-        copyInParams.blockLen = leftRowNum * sizeof(uint32_t);
-        copyOutParams.blockLen = leftRowNum * sizeof(uint32_t);
-        auto indexTensor = inQueue.AllocTensor<uint32_t>();
-        DataCopyPad(indexTensor, idxq, copyInParams, copyInPadParamsi);
-        inQueue.EnQue(indexTensor);
+        {
+            const DataCopyExtParams copyInParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParams = {true, 0, 0, 0};
+            indexTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(indexTensor, idxq, copyInParams, copyInPadParams);
+            inQueue.EnQue(indexTensor);
 
-        indexTensor = inQueue.DeQue<uint32_t>();
-        auto outIndexTensor = outQueue.AllocTensor<uint32_t>();
-        Adds(outIndexTensor, indexTensor, 1, leftRowNump1);
-        inQueue.FreeTensor(indexTensor);
-        outQueue.EnQue(outIndexTensor);
+            indexTensor = inQueue.DeQue<uint32_t>();
+            outIndexTensor = outQueue.AllocTensor<uint32_t>();
+            Adds(outIndexTensor, indexTensor, 1, leftRowNump1);
+            inQueue.FreeTensor(indexTensor);
+            outQueue.EnQue(outIndexTensor);
 
-        outIndexTensor = outQueue.DeQue<uint32_t>();
-        DataCopyPad(idxq[1], outIndexTensor, copyOutParams);
-        outQueue.FreeTensor(outIndexTensor);
-
+            outIndexTensor = outQueue.DeQue<uint32_t>();
+            DataCopyPad(idxq[1], outIndexTensor, copyOutParams);
+            outQueue.FreeTensor(outIndexTensor);
+        }
         // the second part of d z and idxq
         // z[i]=l[i]*beta
         // leftRowNump1 is also the shift of the second part
-        copyInPadParamsf.leftPadding = 0;
-        copyInParams.blockLen = rightColNum * sizeOfFloat;
-        copyOutParams.blockLen = rightColNum * sizeOfFloat;
-        inputTensor = inQueue.AllocTensor<float>();
-        DataCopyPad(inputTensor, l[leftRowNump1], copyInParams, copyInPadParamsf);
-        inQueue.EnQue(inputTensor);
+        {
+            const DataCopyExtParams copyInParams = {1, rightColNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, rightColNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0};
+            inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, l[leftRowNump1], copyInParams, copyInPadParams);
+            inQueue.EnQue(inputTensor);
 
-        inputTensor = inQueue.DeQue<float>();
-        outputTensor = outQueue.AllocTensor<float>();
-        Muls(outputTensor, inputTensor, beta, rightColNum);
-        inQueue.FreeTensor(inputTensor);
-        outQueue.EnQue(outputTensor);
+            inputTensor = inQueue.DeQue<float>();
+            outputTensor = outQueue.AllocTensor<float>();
+            Muls(outputTensor, inputTensor, beta, rightColNum);
+            inQueue.FreeTensor(inputTensor);
+            outQueue.EnQue(outputTensor);
 
-        outputTensor = outQueue.DeQue<float>();
-        DataCopyPad(z[leftRowNump1], outputTensor, copyOutParams);
-        outQueue.FreeTensor(outputTensor);
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(z[leftRowNump1], outputTensor, copyOutParams);
+            outQueue.FreeTensor(outputTensor);
+        }
 
         // no need to shift d.construct the second part of idxq
-        copyInParams.blockLen = rightRowNum * sizeof(uint32_t);
-        copyOutParams.blockLen = rightRowNum * sizeof(uint32_t);
-        indexTensor = inQueue.AllocTensor<uint32_t>();
-        DataCopyPad(indexTensor, idxq[leftRowNump1], copyInParams, copyInPadParamsi);
-        inQueue.EnQue(indexTensor);
+        {
+            const DataCopyExtParams copyInParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParams = {true, 0, 0, 0};
+            indexTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(indexTensor, idxq[leftRowNump1], copyInParams, copyInPadParams);
+            inQueue.EnQue(indexTensor);
 
-        indexTensor = inQueue.DeQue<uint32_t>();
-        outIndexTensor = outQueue.AllocTensor<uint32_t>();
-        Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
-        inQueue.FreeTensor(indexTensor);
-        outQueue.EnQue(outIndexTensor);
+            indexTensor = inQueue.DeQue<uint32_t>();
+            outIndexTensor = outQueue.AllocTensor<uint32_t>();
+            Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
+            inQueue.FreeTensor(indexTensor);
+            outQueue.EnQue(outIndexTensor);
 
-        outIndexTensor = outQueue.DeQue<uint32_t>();
-        DataCopyPad(idxq[leftRowNump1], outIndexTensor, copyOutParams);
-        outQueue.FreeTensor(outIndexTensor);
+            outIndexTensor = outQueue.DeQue<uint32_t>();
+            DataCopyPad(idxq[leftRowNump1], outIndexTensor, copyOutParams);
+            outQueue.FreeTensor(outIndexTensor);
+        }
 
         // init coltype,0 and 1
-        copyOutParams.blockLen = leftRowNum * sizeof(uint32_t);
-        outIndexTensor = outQueue.AllocTensor<uint32_t>();
-        Duplicate<uint32_t>(outIndexTensor, 0, leftRowNum);
-        outQueue.EnQue(outIndexTensor);
+        {
+            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
+            outIndexTensor = outQueue.AllocTensor<uint32_t>();
+            Duplicate<uint32_t>(outIndexTensor, 0, leftRowNum);
+            outQueue.EnQue(outIndexTensor);
 
-        outIndexTensor = outQueue.DeQue<uint32_t>();
-        DataCopyPad(coltyp[1], outIndexTensor, copyOutParams);
-        outQueue.FreeTensor(outIndexTensor);
+            outIndexTensor = outQueue.DeQue<uint32_t>();
+            DataCopyPad(coltyp[1], outIndexTensor, copyOutParams);
+            outQueue.FreeTensor(outIndexTensor);
+        }
+        {
+            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
+            outIndexTensor = outQueue.AllocTensor<uint32_t>();
+            Duplicate<uint32_t>(outIndexTensor, 1, rightRowNum);
+            outQueue.EnQue(outIndexTensor);
 
-        copyOutParams.blockLen = rightRowNum * sizeof(uint32_t);
-        outIndexTensor = outQueue.AllocTensor<uint32_t>();
-        Duplicate<uint32_t>(outIndexTensor, 1, rightRowNum);
-        outQueue.EnQue(outIndexTensor);
+            outIndexTensor = outQueue.DeQue<uint32_t>();
+            DataCopyPad(coltyp[leftRowNump1], outIndexTensor, copyOutParams);
+            outQueue.FreeTensor(outIndexTensor);
+        }
+        // init tmp
+        {
+            const DataCopyExtParams copyInParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+            indexTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(indexTensor, idxq[1], copyInParamsi, copyInPadParamsi);
+            inQueue.EnQue(indexTensor);
 
-        outIndexTensor = outQueue.DeQue<uint32_t>();
-        DataCopyPad(coltyp[leftRowNump1], outIndexTensor, copyOutParams);
-        outQueue.FreeTensor(outIndexTensor);
+            indexTensor = inQueue.DeQue<uint32_t>();
+            Muls(indexTensor, inputTensor, sizeOfFloat, dNum);
 
-        //init tmp 
-        copyInParams.blockLen = totolRowNum * sizeof(uint32_t);
-        indexTensor = inQueue.AllocTensor<uint32_t>();
-        DataCopyPad(indexTensor, idxq[1], copyInParams, copyInPadParamsi);
-        inQueue.EnQue(indexTensor);
-        inputTensor = inQueue.AllocTensor<float>();
+            // get dsigma
+            const DataCopyExtParams copyInParamsf = {1, totolRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParams = {1, dNum * sizeOfFloat, 0, 0, 0};
+            {
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, d, copyInParamsf, copyInPadParamsf);
+                inQueue.EnQue(inputTensor);
 
-        indexTensor = inQueue.DeQue<uint32_t>();
-        outIndexTensor = outQueue.AllocTensor<uint32_t>();
-        Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
-        inQueue.FreeTensor(indexTensor);
+                inputTensor = inQueue.DeQue<float>();
+                outputTensor = outQueue.AllocTensor<float>();
+                // get bytes offset
+                Gather(outputTensor, inputTensor, indexTensor, 0, dNum);
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+
+                outputTensor = outQueue.DeQue<float>();
+                DataCopyPad(dsigma, outputTensor, copyOutParams);
+                outQueue.FreeTensor(outputTensor);
+            }
+            // get z sorted by idxq
+            {
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, z, copyInParamsf, copyInPadParamsf);
+                inQueue.EnQue(inputTensor);
+
+                inputTensor = inQueue.DeQue<float>();
+                outputTensor = outQueue.AllocTensor<float>();
+                Gather(outputTensor, inputTensor, indexTensor, 0, dNum);
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+
+                outputTensor = outQueue.DeQue<float>();
+                DataCopyPad(leftSingularMatrix, outputTensor, copyOutParams);
+                outQueue.FreeTensor(outputTensor);
+            }
+
+            // get coltyp sorted by idxq
+            {
+                inputTensor = inQueue.AllocTensor<uint32_t>();
+                DataCopyPad(inputTensor, coltyp, copyInParamsi, copyInPadParamsi);
+                inQueue.EnQue(inputTensor);
+
+                inputTensor = inQueue.DeQue<uint32_t>();
+                outputTensor = outQueue.AllocTensor<uint32_t>();
+                Gather(outputTensor, inputTensor, indexTensor, 0, dNum);
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+
+                outputTensor = outQueue.DeQue<uint32_t>();
+                DataCopyPad(idxc, outputTensor, copyOutParams);
+                outQueue.FreeTensor(outputTensor);
+            }
+
+            inQueue.FreeTensor(indexTensor);
+        }
+
+        // sort dsigma ,get idx
+        {
+            // firstly construct MrgSort list.4B score 4B index.8n,8n+4
+            {
+                const DataCopyExtParams copyInParams = {1, dNum * sizeOfFloat, 0, 0, 0};
+                const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+                LocalTensor<float> mrglist = tmpBuf.Get<float>();
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, dsigma, copyInParams, copyInPadParams);
+                inQueue.EnQue(inputTensor);
+
+                inputTensor = inQueue.DeQue<float>();
+                indexTensor = inQueue.AllocTensor<uint32_t>();
+                auto tmp = outputQueue.AllocTensor<uint32_t>();
+
+                CreateVecIndex<uint32_t>(indexTensor, 0, dNum);
+                Muls(tmp, indexTensor, 8, dNum);
+                Scatter(mrglist, inputTensor, tmp, 0, dNum);
+
+                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>();
+                Scatter(mrglisti, indexTensor, tmp, 4, dNum); // 8n+4
+                inQueue.FreeTensor(indexTensor);
+                inQueue.FreeTensor(inputTensor);
+            }
+            // MrgSort the mrglist
+            {
+                LocalTensor<float> workTensor = tmpBuf.Get<float>();
+                LocalTensor<float> dstTensor = workTensor[2 * LDN]; // the other half of tmpBuf
+                MrgSortSrcList<float> mrgSortSrcList;
+                mrgSortSrcList.src1 = workTensor;
+                mrgSortSrcList.src2 = workTensor[leftRowNum];
+                MrgSort4Info params;
+                params.elementLengths[0] = leftRowNum;
+                params.elementLengths[1] = rightRowNum;
+                params.ifExhaustedSuspension = false;
+                params.validBit = 3;
+                params.repeatTimes = 1;
+                MrgSort(dstTensor, mrgSortSrcList, params);
+            }
+            // get the sorted d and idx
+            {
+                const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+                const DataCopyExtParams copyOutParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+
+                LocalTensor<float> mrglistf = tmpBuf.Get<float>()[2 * LDN];
+                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>()[2 * LDN;
+
+                indexTensor = inQueue.AllocTensor<uint32_t>();
+                outputTensor = outQueue.AllocTensor<float>();
+                outputIndexTensor = outQueue.AllocTensor<uint32_t>();
+                CreateVecIndex<uint32_t>(indexTensor, 0, dNum);
+                Muls(indexTensor, indexTensor, 8, dNum);
+                Gather(outputTensor, mrglistf, indexTensor, 0, dNum);
+                Gather(outputIndexTensor, mrglisti, indexTensor, 4, dNum);
+                outputQueue.EnQue(outputTensor);
+                outputQueue.EnQue(outputIndexTensor);
+                inQueue.FreeTensor(indexTensor);
+
+                outputTensor = outQueue.DeQue<float>();
+                DataCopyPad(d, outputTensor, copyOutParamsf);
+                outQueue.FreeTensor(outputTensor);
+
+                outputIndexTensor = outQueue.DeQue<uint32_t>();
+                DataCopyPad(idx, outputIndexTensor, copyOutParamsi);
+            }
+        }
+
+
+        {
+        }
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
     {
