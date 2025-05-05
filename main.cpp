@@ -37,8 +37,8 @@ int main(int argc, char **argv)
     size_t EArrayFileSize = (N - 1) * sizeof(float);
     size_t TauqArrayFileSize = N * sizeof(float);
     size_t TaupArrayFileSize = (N - 1) * sizeof(float);
-    size_t QtMatrixFileSize = N * N * sizeof(float);
-    size_t WtMatrixFileSize = N * N * sizeof(float);
+    size_t QtMatrixFileSize = 2 * N * N * sizeof(float);
+    size_t WtMatrixFileSize = 2 * N * N * sizeof(float);
     size_t TilingFileSize = getTilingSize(N, svdBlockNum);
     size_t idxFileSize = 16 * N * sizeof(uint32_t);
 
@@ -164,7 +164,6 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMemcpy(DArrayHost, DArrayFileSize, DArrayDevice, DArrayFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // CHECK_ACL(aclrtMemcpy(AMatrixHost, AMatrixFileSize, AMatrixDevice, AMatrixFileSize, ACL_MEMCPY_DEVICE_TO_HOST));
     // PrintPartOfMatrix<float>(AMatrixHost, M, N, 2, 2);
-
 
     {
         // 直接将D数组作为奇异值向量输出
