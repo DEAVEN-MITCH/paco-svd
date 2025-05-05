@@ -71,15 +71,15 @@ namespace
         return;
     }
     using BDCMatmulType = Matmul<MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>,
-                              MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float, true>,
-                              MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>>;
+                                 MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float, true>,
+                                 MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>>;
 }
 template <bool ifVecTiling = false, bool ifParallel = false>
 class BDC
 {
 public:
     __aicore__ inline BDC() : blockIdx(AscendC::GetBlockIdx()), blockNum(AscendC::GetBlockNum()) {}
-    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR qt, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe,BDCMatmulType &inputmm)
+    __aicore__ inline void init(int M, int N, GM_ADDR a, GM_ADDR u, GM_ADDR vt, GM_ADDR d, GM_ADDR e, GM_ADDR qt, GM_ADDR wt, GM_ADDR idx, GM_ADDR svdStack, GM_ADDR workspace, SVDTiling *tiling, TPipe &pipe, BDCMatmulType &inputmm)
     {
         NotParallelQuiter;
         ASSERT(M >= N && "M must be greater than or equal to N");
@@ -95,8 +95,28 @@ public:
         eGm.SetGlobalBuffer((__gm__ float *)e, N - 1);
         qtGm.SetGlobalBuffer((__gm__ float *)qt, N * N);
         wtGm.SetGlobalBuffer((__gm__ float *)wt, N * N);
-        idxqGm.SetGlobalBuffer((__gm__ uint32_t *)idx, N);
+        stGm.SetGlobalBuffer((__gm__ float *)(qt + sizeOfFloat * N * N), N);
+        gtGm.SetGlobalBuffer((__gm__ float *)(wt + sizeOfFloat * N * N), N);
+        idxqGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idx += N * sizeOfFloat;
+        fGm.SetGlobalBuffer((__gm__ float *)idx, N);
+        idx += N * sizeOfFloat;
+        lGm.SetGlobalBuffer((__gm__ float *)idx, N);
+        idx += N * sizeOfFloat;
+        sigmaGm.SetGlobalBuffer((__gm__ float *)idx, N);
+        idx += N * sizeOfFloat;
+        idxpGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idx += N * sizeOfFloat;
+        idxGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idx += N * sizeOfFloat;
+        idxcGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idx += N * sizeOfFloat;
+        coltypGm.SetGlobalBuffer((__gm__ uint16_t *)idx, N);
+        idx += N * sizeOfFloat;
+        zGm.SetGlobalBuffer((__gm__ float *)idx, N);
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
+        pipe.InitBuffer(inQueue, BUFFER_NUM, N * sizeOfFloat + 32);
+        pipe.InitBuffer(outQueue, BUFFER_NUM, N * sizeOfFloat + 32);
 
         // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
@@ -112,7 +132,7 @@ public:
         {
             if (blockIdx == 0)
             {
-                compute_2x2_svd(qtGm, wtGm, dGm, eGm, idxqGm);
+                compute_2x2_svd(qtGm, wtGm, dGm, eGm, idxqGm, fGm, lGm);
             }
             updateUVt();
 
@@ -122,7 +142,7 @@ public:
         {
             if (blockIdx == 0)
             {
-                compute_1x1_svd(qtGm, wtGm, dGm, idxqGm);
+                compute_1x1_svd(qtGm, wtGm, dGm, idxqGm, fGm, lGm);
             }
             updateUVt();
 
@@ -196,6 +216,27 @@ private:
     __aicore__ inline void MergeSubMatrix(const SVDSubmatrixInfo &leftSubMatrix, const SVDSubmatrixInfo &rightSubMatrix)
     {
         // acquire singular matrix of subproblems
+        bool isSquare = rightSubMatrix.end_col == LDN;
+        auto leftColNum = leftSubMatrix.end_col - leftSubMatrix.start_col;    // nl cols,nl-1 rows
+        auto rightColNum = rightSubMatrix.end_col - rightSubMatrix.start_col; // nr cols,nr-1+isSquare rows
+        auto totalColNum = leftColNum + rightColNum;                          // total n cols,n-1+isSquare rows;
+        auto alpha = dGm(leftSubMatrix.end_col - 1);
+        auto beta = eGm(leftSubMatrix.end_col - 1);
+        uint16_t k;
+        auto d = dGm[leftSubMatrix.start_col];
+        auto z = zGm[leftSubMatrix.start_col];
+        GlobalTensor<float> leftSingularMatrix = qtGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
+        GlobalTensor<float> rightSingularMatrix = wtGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
+        GlobalTensor<float> st = stGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
+        GlobalTensor<float> gt = gtGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
+        GlobalTensor<float> f = fGm[leftSubMatrix.start_col];
+        GlobalTensor<float> l = lGm[leftSubMatrix.start_col];
+        GlobalTensor<uint32_t> idxq = idxqGm[leftSubMatrix.start_col];
+        auto idxc = idxcGm[leftSubMatrix.start_col];
+        auto idxp = idxpGm[leftSubMatrix.start_col];
+        auto coltyp = coltypGm[leftSubMatrix.start_col];
+        // TODO scale for stability
+
         // form d and z
         // rotate to remove the N+1 column if necessary
         // get idxq
@@ -203,41 +244,57 @@ private:
         // deflate z1
         // deflate z and d
         // permute qt and wt
+        Deflation(leftColNum, rightColNum, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, coltyp);
+
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
         return;
     }
 
+    __aicore__ inline void Deflation(uint16_t leftColNum, uint16_t rightColNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint16_t> &idxq, GlobalTensor<uint16_t> &idxc, GlobalTensor<uint16_t> &idxp, GlobalTensor<uint16_t> &coltyp)
+    {
+        float addedRowNo = leftColNum;
+
+        float z1 = alpha * l(leftColNum - 1);
+
+    }
+    __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
+    {
+    }
+
     __aicore__ inline void compute_base_case_svd(const SVDSubmatrixInfo &subMatrix)
     {
         const auto idx_start = subMatrix.start_col;
-        const auto colNum = subMatrix.end_col - idx_start + 1;
+        const auto colNum = subMatrix.end_col - idx_start;
         const auto rowNum = subMatrix.end_col == LDN ? colNum : colNum - 1;
+        printf("compute_base_case_svd,start_col:%d,colNum:%d,rowNum:%d\n", idx_start, colNum, rowNum);
         GlobalTensor<float> qt = qtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> wt = wtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> d = dGm[idx_start];
-        GlobalTensor<uint32_t> idxq = idxqGm[idx_start];
+        GlobalTensor<uint16_t> idxq = idxqGm[idx_start];
+        GlobalTensor<float> f = fGm[idx_start];
+        GlobalTensor<float> l = lGm[idx_start];
         // allow e to be valid in case 1x1
         GlobalTensor<float> e = idx_start == LDN - 1 ? dGm[idx_start] : eGm[idx_start];
         if (colNum == 3)
         {
-            compute_2x3_svd(qt, wt, d, e, idxq);
+            compute_2x3_svd(qt, wt, d, e, idxq, f, l);
         }
         else if (colNum == 2 && rowNum == 2)
         {
-            compute_2x2_svd(qt, wt, d, e, idxq);
+            compute_2x2_svd(qt, wt, d, e, idxq, f, l);
         }
         else if (colNum == 2 && rowNum == 1)
         {
-            compute_1x2_svd(qt, wt, d, e, idxq);
+            compute_1x2_svd(qt, wt, d, e, idxq, f, l);
         }
         else if (colNum == 1 && rowNum == 1)
         {
-            compute_1x1_svd(qt, wt, d, idxq);
+            compute_1x1_svd(qt, wt, d, idxq, f, l);
         }
     }
-    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1), a23 = e(1);
         idxq(0) = 0;
@@ -247,7 +304,6 @@ private:
             // rank0
             d(0) = 0;
             d(1) = 0;
-            return;
         }
         else if (a11 == 0 && a12 == 0)
         {
@@ -268,7 +324,6 @@ private:
             // wt(2 * LDN) = 0;
             wt(2 * LDN + 1) = a23 / sq;
             wt(2 * LDN + 2) = -a22 / sq;
-            return;
         }
         else if (a22 == 0 && a23 == 0)
         {
@@ -281,8 +336,6 @@ private:
             wt(1) = a12 / sq;
             wt(LDN) = a12 / sq;
             wt(LDN + 1) = -a11 / sq;
-
-            return;
         }
         else if (a11 == 0 && a23 == 0)
         {
@@ -298,7 +351,6 @@ private:
             wt(1) = 1;
             wt(LDN) = 1;
             wt(LDN + 1) = 0;
-            return;
         }
         else
         {
@@ -335,8 +387,14 @@ private:
             wt(2 * LDN + 1) = v2 / normv;
             wt(2 * LDN + 2) = v3 / normv;
         }
+        f(0) = wt(0);
+        f(1) = wt(LDN);
+        f(2) = wt(2 * LDN);
+        l(0) = wt(2);
+        l(1) = wt(2 + LDN);
+        l(2) = wt(2 * LDN + 2);
     }
-    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_2x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1);
 
@@ -351,7 +409,6 @@ private:
             // qt(LDN + 1) = 1.0f;
             // wt(0) = 1.0f;
             // wt(LDN + 1) = 1.0f;
-            return;
         }
         else if (a22 == 0)
         {
@@ -365,7 +422,6 @@ private:
             wt(1) = a12 / sq;
             wt(LDN) = a12 / sq;
             wt(LDN + 1) = -a11 / sq;
-            return;
         }
         else if (a11 == 0)
         {
@@ -381,7 +437,6 @@ private:
             wt(1) = 1;
             wt(LDN) = 1;
             wt(LDN + 1) = 0;
-            return;
         }
         else if (a12 == 0)
         {
@@ -434,10 +489,13 @@ private:
             wt(LDN + 1) = v2 / normv;
             qt(LDN) = u1 / normu;
             qt(LDN + 1) = u2 / normu;
-            return;
         }
+        f(0) = wt(0);
+        f(1) = wt(LDN);
+        l(0) = wt(1);
+        l(1) = wt(1 + LDN);
     }
-    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_1x2_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0);
         float sq = sqrt(a11 * a11 + a12 * a12);
@@ -450,7 +508,6 @@ private:
             // wt(1) = 0;
             // wt(LDN) = 0;
             // wt(LDN + 1) = 1.0f;
-            return;
         }
         else
         {
@@ -458,10 +515,13 @@ private:
             wt(1) = a12 / sq;
             wt(LDN) = a12 / sq;
             wt(LDN + 1) = -a11 / sq;
-            return;
         }
+        f(0) = wt(0);
+        f(1) = wt(LDN);
+        l(0) = wt(1);
+        l(1) = wt(1 + LDN);
     }
-    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint32_t> &idxq)
+    __aicore__ inline void compute_1x1_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<uint16_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         idxq(0) = 0;
         float a11 = d(0);
@@ -469,6 +529,8 @@ private:
         d(0) = fabs(a11);
         // wt(0) = 1.0f;
         // no need to set w to 1.0f because it initializes to unit matrix
+        f(0) = wt(0);
+        l(0) = wt(0);
     }
 
     __aicore__ inline void rearrange_qwtAccordingToIdxq()
@@ -483,47 +545,47 @@ private:
         // all rows of Vt are updated
         AscendC ::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         printf("before updateUVt\n");
-        singleDumpTensor(uGm, 16);
-        singleDumpTensor(vtGm, 16);
-        singleDumpTensor(qtGm, 16);
-        singleDumpTensor(wtGm, 16);
+        singleDumpTensor(uGm, 1024);
+        singleDumpTensor(vtGm, 1024);
+        singleDumpTensor(qtGm, 1024);
+        singleDumpTensor(wtGm, 1024);
 
         mm->SetOrgShape(LDM, LDN, LDM, LDN);
-        printf("after setOrgShape\n");
+        // printf("after setOrgShape\n");
         mm->SetSingleShape(LDM, LDN, LDN);
-        printf("after setSingleShape\n");
+        // printf("after setSingleShape\n");
         mm->SetTensorA(uGm);
-        printf("after setTensorA\n");
+        // printf("after setTensorA\n");
         mm->SetTensorB(qtGm, true);
-        printf("after setTensorB\n");
+        // printf("after setTensorB\n");
         mm->IterateAll(tmpGm);
-        printf("after iterateAll\n");
+        // printf("after iterateAll\n");
         // printf("%f %f %f %f\n", tmpGm(0), tmpGm(1), tmpGm(2), tmpGm(3));
 
         // mm->End();
         // printf("after end\n");
         // Copy tmpGm to uGm
         printf("before cache refresh\n");
-        singleDumpTensor(tmpGm, 16);
-        singleDumpTensor(uGm, 16);
-        singleDumpTensor(wtGm, 16);
-        singleDumpTensor(vtGm, 16);
+        singleDumpTensor(tmpGm, 1024);
+        singleDumpTensor(uGm, 1024);
+        singleDumpTensor(wtGm, 1024);
+        singleDumpTensor(vtGm, 1024);
 
         // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(tmpGm);
-        printf("before copyMatrix\n");
-        singleDumpTensor(tmpGm, 16);
-        singleDumpTensor(uGm, 16);
-        singleDumpTensor(wtGm, 16);
-        singleDumpTensor(vtGm, 16);
+        // printf("before copyMatrix\n");
+        // singleDumpTensor(tmpGm, 1024);
+        // singleDumpTensor(uGm, 1024);
+        // singleDumpTensor(wtGm, 1024);
+        // singleDumpTensor(vtGm, 1024);
 
         CopyMatrix(tmpGm, uGm, LDN, LDM, LDM, LDN);
 
-        printf("after copyMatrix\n");
-        singleDumpTensor(uGm, 16);
-        printf("after updateU\n");
-        printf("before updateVt\n");
-        singleDumpTensor(wtGm, 16);
-        singleDumpTensor(vtGm, 16);
+        // printf("after copyMatrix\n");
+        // singleDumpTensor(uGm, 1024);
+        // printf("after updateU\n");
+        // printf("before updateVt\n");
+        // singleDumpTensor(wtGm, 1024);
+        // singleDumpTensor(vtGm, 1024);
 
         mm->SetOrgShape(LDN, LDN, LDN, LDN);
         mm->SetSingleShape(LDN, LDN, LDN);
@@ -531,17 +593,17 @@ private:
         mm->SetTensorB(vtGm);
         mm->IterateAll(tmpGm);
         mm->End();
-        printf("after end\n");
-        printf("before DataCacheCleanAndInvalid\n");
-        singleDumpTensor(tmpGm, 16);
+        // printf("after end\n");
+        // printf("before DataCacheCleanAndInvalid\n");
+        // singleDumpTensor(tmpGm, 1024);
 
         // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
         // Copy tmpGm to vtGm
-        printf("before copyMatrix\n");
-        singleDumpTensor(tmpGm, 16);
+        // printf("before copyMatrix\n");
+        // singleDumpTensor(tmpGm, 1024);
         CopyMatrix(tmpGm, vtGm, LDN, LDN, LDN, LDN);
-        printf("after updateVt\n");
-        singleDumpTensor(vtGm, 16);
+        // printf("after updateVt\n");
+        // singleDumpTensor(vtGm, 1024);
 
         return;
     }
@@ -584,7 +646,14 @@ private:
     // would in the end be stored in uGm and vtGm
     // d would be used to store singular values,and e would store the intermediate z;
     GlobalTensor<float> tmpGm, uGm, vtGm, dGm, eGm, qtGm, wtGm;
-    GlobalTensor<uint32_t> idxqGm;
+    GlobalTensor<float> stGm, gtGm, fGm, lGm;
+    GlobalTensor<uint16_t> idxqGm;
+    GlobalTensor<float> sigmaGm, zGm;
+    GlobalTensor<uint16_t> idxpGm;
+    GlobalTensor<uint16_t> idxGm;
+    GlobalTensor<uint16_t> idxcGm;
+    GlobalTensor<uint16_t> coltypGm;
+
     GlobalTensor<uint16_t> svdStackGm;
     BDCMatmulType *mm;
     const uint8_t blockIdx, blockNum;
