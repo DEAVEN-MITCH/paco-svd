@@ -266,6 +266,7 @@ private:
         const uint16_t totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = totalRowNum + isSquare, dNum = totalRowNum - 1;
         const uint16_t leftRowNump1 = leftRowNum + 1;
         const uint16_t leftRowNump2 = leftRowNum + 2;
+        const uint16_t leftColNum = leftRowNum + 1;
         const uint16_t rightColNum = rightRowNum + 1 - isSquare;
         // form d and z
         RefreshAllCache();
@@ -664,8 +665,8 @@ private:
                     // record the iprev as undeflated,and update jprev
                     ++k;
                     // begin from 1.
-                    st(k) = z(jprev);
-                    dsigma(k) = d(jprev);
+                    // st(k) = z(jprev);
+                    // dsigma(k) = d(jprev);
                     idxp(k) = jprev;
                     jprev = j;
                 }
@@ -673,12 +674,223 @@ private:
         }
         // record the last singular value
         ++k;
-        st(k) = z(jprev);
-        dsigma(k) = d(jprev);
+        // st(k) = z(jprev);
+        // dsigma(k) = d(jprev);
         idxp(k) = jprev;
     label120:
+        // not using ctot and psm,to simplify the code and take advantage of AIC
+        RefreshAllCache();
+        // sort the singular values into dsigma
+        {
+            const DataCopyExtParams copyInParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyInParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+            auto dTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(dTensor, d[1], copyInParamsf, copyInPadParamsf);
+            inQueue.EnQue(dTensor);
+
+            auto idxpTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(idxpTensor, idxp[1], copyInParamsi, copyInPadParamsi); // idxp start from 1,so it needs to minus 1
+            inQueue.EnQue(idxpTensor);
+
+            dTensor = inQueue.DeQue<float>();
+            idxpTensor = inQueue.DeQue<uint32_t>();
+            outputTensor = outQueue.AllocTensor<float>();
+            Adds<int32_t>(idxpTensor.ReinterpretCast<int32_t>(), idxpTensor.ReinterpretCast<int32_t>(), -1, dNum);
+            Muls<int32_t>(idxpTensor.ReinterpretCast<int32_t>(), idxpTensor.ReinterpretCast<int32_t>(), sizeOfFloat, dNum);
+            Scatter(outputTensor, dTensor, idxpTensor, 0, dNum);
+            outQueue.EnQue(outputTensor);
+            inQueue.FreeTensor(dTensor);
+            inQueue.FreeTensor(idxpTensor);
+
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(dsigma[1], outputTensor, copyOutParamsf);
+            outQueue.FreeTensor(outputTensor);
+        }
+
+        // sort  corresponding singular vectors into  st, and gt respectively.
+        for (j = 1; j < totalRowNum; ++j)
+        {
+            uint32_t jp = idxp(j);
+            dsigma(j) = d(jp);
+            uint32_t idxj = idxq(idx(idxp(j)) + 1);
+            if (idxj < leftRowNump1)
+            {
+                --idxj;
+            }
+            // copy the idxj-th row to jth row of st and gt
+            copyRow(totalRowNum, leftSingularMatrix[idxj * LDN], st[j * LDN]);
+            copyRow(totalColNum, rightSingularMatrix[idxj * LDN], gt[j * LDN]);
+        }
+
+        // Determine dsigma(0),dsigma(1),z(0)
+        {
+            dsigma(0) = 0.0f;
+            float hlftol = tol / 2.0f;
+            if (fabs(dsigma(1)) <= hlftol)
+            {
+                dsigma(1) = hlftol;
+            }
+            // notSquare,rotate another time
+            if (totalColNum > totalRowNum)
+            {
+                // rotate another time
+                float z0 = z(0);
+                z(0) = sqrt(z0 * z0 + z(totalRowNum) * z(totalRowNum));
+                if (z(0) <= tol)
+                {
+                    // z0 and z(totalRowNum) are both small,so we deflate both without rotation
+                    c = 1;
+                    s = 0;
+                    z(0) = tol;
+                }
+                else
+                {
+                    c = z0 / z(0);
+                    s = z(totalRowNum) / z(0);
+                }
+            }
+            else
+            {
+                if (fabs(z(0)) <= tol)
+                {
+                    z(0) = tol;
+                }
+                else
+                {
+                    // z(0)=z(0)
+                }
+            }
+        }
 
         ++k; // k functions as index before,now it functions as the number of nondeflated cols
+
+        // sort z by idxp
+        {
+            const DataCopyExtParams copyInParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParamsf = {1, (k - 1) * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyInParamsi = {1, (k - 1) * sizeOfUint32_t, 0, 0, 0};
+            const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+            // 用idxp来scatter z[1:]到z[1:]
+            // 首先获取idxp
+            indexTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(indexTensor, idxp[1], copyInParamsi, copyInPadParamsi);
+            inQueue.EnQue(indexTensor);
+
+            // 获取z
+            inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, z[1], copyInParamsf, copyInPadParamsf);
+            inQueue.EnQue(inputTensor);
+
+            indexTensor = inQueue.DeQue<uint32_t>();
+            inputTensor = inQueue.DeQue<float>();
+            outputTensor = outQueue.AllocTensor<float>();
+            Adds<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), -1, k - 1);
+            Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), sizeOfFloat, k - 1);
+            Scatter(outputTensor, inputTensor, indexTensor, 0, k - 1);
+            outQueue.EnQue(outputTensor);
+
+            // 释放输入张量
+            inQueue.FreeTensor(inputTensor);
+            inQueue.FreeTensor(indexTensor);
+
+            // 获取结果并写回z
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(z[1], outputTensor, copyOutParamsf);
+            outQueue.FreeTensor(outputTensor);
+        }
+
+        // set the first rows of st and gt,and last row of gt
+        // first row of st
+        {
+            const DataCopyExtParams copyOutParamsf = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+            outputTensor = outQueue.AllocTensor<float>();
+            Duplicate(outputTensor, 0.0f, totalRowNum);
+            outQueue.EnQue(outputTensor);
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(st, outputTensor, copyOutParamsf);
+            outQueue.FreeTensor(outputTensor);
+            st(leftRowNum) = 1.0f;
+        }
+        // first row and last row of gt
+        {
+            if (totalColNum > totalRowNum)
+            {
+                // first row of gt is c rightSingularMatrixRow[LeftRowNum]+s rightSingularMatrixRow[totalColNum-1]
+                // last row of gt is -s rightSingularMatrixRow[LeftRowNum]+c rightSingularMatrixRow[totalColNum-1]
+                {
+                    const DataCopyExtParams copyInParamsf = {1, leftColNum * sizeOfFloat, 0, 0, 0};
+                    const DataCopyExtParams copyOutParamsf = {1, leftColNum * sizeOfFloat, 0, 0, 0};
+                    const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+                    inputTensor = inQueue.AllocTensor<float>();
+                    DataCopyPad(inputTensor, rightSingularMatrix[leftRowNum * LDN], copyInParamsf, copyInPadParamsf);
+                    inQueue.EnQue(inputTensor);
+
+                    inputTensor = inQueue.AllocTensor<float>();
+                    outputTensor = outQueue.AllocTensor<float>();
+                    auto outputTensor2 = outQueue.AllocTensor<float>();
+                    Muls(outputTensor, inputTensor, c, leftColNum);
+                    Muls(outputTensor2, inputTensor, -s, leftColNum);
+                    outQueue.EnQue(outputTensor);
+                    outQueue.EnQue(outputTensor2);
+
+                    outputTensor = outQueue.DeQue<float>();
+                    outputTensor2 = outQueue.DeQue<float>();
+                    DataCopyPad(gt, outputTensor, copyOutParamsf);
+                    DataCopyPad(gt[(totalColNum - 1) * LDN], outputTensor2, copyOutParamsf);
+                    outQueue.FreeTensor(outputTensor);
+                    outQueue.FreeTensor(outputTensor2);
+                }
+                {
+                    const DataCopyExtParams copyInParamsf = {1, rightColNum * sizeOfFloat, 0, 0, 0};
+                    const DataCopyExtParams copyOutParamsf = {1, rightColNum * sizeOfFloat, 0, 0, 0};
+                    const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+                    inputTensor = inQueue.AllocTensor<float>();
+                    DataCopyPad(inputTensor, rightSingularMatrix[(totalColNum - 1) * LDN + leftColNum], copyInParamsf, copyInPadParamsf);
+                    inQueue.EnQue(inputTensor);
+
+                    inputTensor = inQueue.AllocTensor<float>();
+                    outputTensor = outQueue.AllocTensor<float>();
+                    auto outputTensor2 = outQueue.AllocTensor<float>();
+                    Muls(outputTensor, inputTensor, s, rightColNum);
+                    Muls(outputTensor2, inputTensor, c, rightColNum);
+                    outQueue.EnQue(outputTensor);
+                    outQueue.EnQue(outputTensor2);
+
+                    outputTensor = outQueue.DeQue<float>();
+                    outputTensor2 = outQueue.DeQue<float>();
+                    DataCopyPad(gt[leftColNum], outputTensor, copyOutParamsf);
+                    DataCopyPad(gt[(totalColNum - 1) * LDN + leftColNum], outputTensor2, copyOutParamsf);
+                    outQueue.FreeTensor(outputTensor);
+                    outQueue.FreeTensor(outputTensor2);
+                }
+            }
+            else
+            {
+                // is square
+                //  copy rightSingularMatrixRow[leftRowNum] to gt[0]
+                //  no need to compute the last row of gt
+                copyRow(totalColNum, rightSingularMatrix[leftRowNum * LDN], gt);
+            }
+        }
+
+        if (totalRowNum > k)
+        {
+            // there's deflation,copy the decided singular values and vectors back
+            // dsigma is computed by scalar,refreshAllCashe first
+            RefreshAllCache();
+            copyRow(totalRowNum - k, dsigma[k], d[k]);
+            // copy totalRowNum-k rows of left singular vects and right singular vects
+            for (int j = k; j < totalRowNum; ++j)
+            {
+                copyRow(totalRowNum, st[j * LDN], leftSingularMatrix[j * LDN]);
+                copyRow(totalColNum, gt[j * LDN], rightSingularMatrix[j * LDN]);
+            }
+        }
+
         return;
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
@@ -1032,11 +1244,9 @@ private:
     __aicore__ inline void CopyMatrix(GlobalTensor<float> &src, GlobalTensor<float> &dst, uint16_t src_n, uint16_t dst_n, uint16_t copyM, uint16_t copyN)
     {
         NotParallelQuiter;
-        const uint8_t padLen = copyN % BlockFloatCnt == 0 ? 0 : BlockFloatCnt - copyN % BlockFloatCnt;
-        const uint32_t ttl = copyN + padLen;
         DataCopyExtParams copyInParams = {1, copyN * sizeOfFloat, 0, 0, 0};
         DataCopyExtParams copyOutParams = {1, copyN * sizeOfFloat, 0, 0, 0};
-        DataCopyPadExtParams<float> copyInPadParams = {true, 0, padLen, 0.0f};
+        DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
 
         for (int i = 0; i < copyM; i++)
         {
@@ -1050,6 +1260,20 @@ private:
         }
     }
 
+    __aicore__ inline void copyRow(uint16_t rowLen, GlobalTensor<float> src, GlobalTensor<float> dst)
+    {
+        DataCopyExtParams copyInParams = {1, rowLen * sizeOfFloat, 0, 0, 0};
+        DataCopyExtParams copyOutParams = {1, rowLen * sizeOfFloat, 0, 0, 0};
+        DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+
+        auto bindLocalf = copyBind.AllocTensor<float>();
+        DataCopyPad(bindLocalf, src, copyInParams, copyInPadParams);
+        copyBind.EnQue(bindLocalf);
+
+        bindLocalf = copyBind.DeQue<float>();
+        DataCopyPad(dst, bindLocalf, copyOutParams);
+        copyBind.FreeTensor(bindLocalf);
+    }
     __aicore__ inline SVDSubmatrixInfo getSVDSubmatrixInfo(uint16_t idx)
     {
         return {svdStackGm(2 * idx), svdStackGm(2 * idx + 1)};
