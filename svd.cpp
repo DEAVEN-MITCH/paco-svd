@@ -1,6 +1,6 @@
 #include "kernel_operator.h"
 #include <lib/matmul_intf.h>
-
+#include <limits>
 #define NotParallelQuiter      \
     if constexpr (!ifParallel) \
     {                          \
@@ -17,8 +17,9 @@
     }
 
 constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
-constexpr float EPS = 1e-6;
+constexpr float EPS = std::numeric_limits<float>::epsilon();
 constexpr uint32_t sizeOfFloat = sizeof(float);
+constexpr uint32_t sizeOfUint32_t = sizeof(uint32_t);
 constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
 constexpr int32_t SizePerOperation = 256;
@@ -42,7 +43,10 @@ namespace
     {
         return a < 0 ? -a : a;
     }
-
+    // __aicore__ inline float max(float a, float b)
+    // {
+    //     return a >= b ? a : b;
+    // }
 }
 namespace
 {
@@ -63,7 +67,7 @@ namespace
         uint32_t *ptr = reinterpret_cast<uint32_t *>(tiling);
         auto tiling32 = reinterpret_cast<__gm__ uint32_t *>(tilingGM);
 
-        for (uint32_t i = 0; i < sizeof(SVDTiling) / sizeof(uint32_t); i++, ptr++)
+        for (uint32_t i = 0; i < sizeof(SVDTiling) / sizeOfUint32_t; i++, ptr++)
         {
             *ptr = *(tiling32 + i);
         }
@@ -236,6 +240,7 @@ private:
         GlobalTensor<uint32_t> idxq = idxqGm[leftSubMatrix.start_col];
         auto idxc = idxcGm[leftSubMatrix.start_col];
         auto idxp = idxpGm[leftSubMatrix.start_col];
+        auto idx = idxGm[leftSubMatrix.start_col];
         auto coltyp = coltypGm[leftSubMatrix.start_col];
         auto dsigma = dsigmaGm[leftSubMatrix.start_col];
         // TODO scale for stability
@@ -246,7 +251,7 @@ private:
         // deflate z1
         // deflate z and d
         // permute qt and wt
-        Deflation(leftColNum - 1, rightColNum - 1 + isSquare, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, coltyp, dsigma);
+        Deflation(leftColNum - 1, rightColNum - 1 + isSquare, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, idx, coltyp, dsigma);
 
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
@@ -254,7 +259,7 @@ private:
         return;
     }
 
-    __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
+    __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &idx, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
     {
         const uint16_t totolRowNum = leftRowNum + rightRowNum + 1, totolColNum = totolRowNum + isSquare, dNum = totolRowNum - 1;
         const uint16_t leftRowNump1 = leftRowNum + 1;
@@ -301,8 +306,9 @@ private:
 
         // construct the first part of idxq ,idxq[i+1] = idxq[i]+1
         {
-            const DataCopyExtParams copyInParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
-            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
+            // 因为矢量计算不支持uint32_t，改成int32_t又类型不兼容.reinterpretCast
+            const DataCopyExtParams copyInParams = {1, leftRowNum * sizeOfUint32_t, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeOfUint32_t, 0, 0, 0};
             const DataCopyPadExtParams<uint32_t> copyInPadParams = {true, 0, 0, 0};
             indexTensor = inQueue.AllocTensor<uint32_t>();
             DataCopyPad(indexTensor, idxq, copyInParams, copyInPadParams);
@@ -310,7 +316,7 @@ private:
 
             indexTensor = inQueue.DeQue<uint32_t>();
             outIndexTensor = outQueue.AllocTensor<uint32_t>();
-            Adds(outIndexTensor, indexTensor, 1, leftRowNump1);
+            Adds<int32_t>(outIndexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), 1, leftRowNump1);
             inQueue.FreeTensor(indexTensor);
             outQueue.EnQue(outIndexTensor);
 
@@ -342,8 +348,8 @@ private:
 
         // no need to shift d.construct the second part of idxq
         {
-            const DataCopyExtParams copyInParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
-            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyInParams = {1, rightRowNum * sizeOfUint32_t, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeOfUint32_t, 0, 0, 0};
             const DataCopyPadExtParams<uint32_t> copyInPadParams = {true, 0, 0, 0};
             indexTensor = inQueue.AllocTensor<uint32_t>();
             DataCopyPad(indexTensor, idxq[leftRowNump1], copyInParams, copyInPadParams);
@@ -351,7 +357,7 @@ private:
 
             indexTensor = inQueue.DeQue<uint32_t>();
             outIndexTensor = outQueue.AllocTensor<uint32_t>();
-            Adds(outIndexTensor, indexTensor, leftRowNump1, rightRowNum);
+            Adds<int32_t>(outIndexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), leftRowNump1, rightRowNum);
             inQueue.FreeTensor(indexTensor);
             outQueue.EnQue(outIndexTensor);
 
@@ -362,7 +368,7 @@ private:
 
         // init coltype,0 and 1
         {
-            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, leftRowNum * sizeOfUint32_t, 0, 0, 0};
             outIndexTensor = outQueue.AllocTensor<uint32_t>();
             Duplicate<uint32_t>(outIndexTensor, 0, leftRowNum);
             outQueue.EnQue(outIndexTensor);
@@ -372,7 +378,7 @@ private:
             outQueue.FreeTensor(outIndexTensor);
         }
         {
-            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, rightRowNum * sizeOfUint32_t, 0, 0, 0};
             outIndexTensor = outQueue.AllocTensor<uint32_t>();
             Duplicate<uint32_t>(outIndexTensor, 1, rightRowNum);
             outQueue.EnQue(outIndexTensor);
@@ -383,14 +389,14 @@ private:
         }
         // init tmp
         {
-            const DataCopyExtParams copyInParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyInParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
             const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
             indexTensor = inQueue.AllocTensor<uint32_t>();
             DataCopyPad(indexTensor, idxq[1], copyInParamsi, copyInPadParamsi);
             inQueue.EnQue(indexTensor);
 
             indexTensor = inQueue.DeQue<uint32_t>();
-            Muls(indexTensor, inputTensor, sizeOfFloat, dNum);
+            Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), sizeOfFloat, dNum);
 
             // get dsigma
             const DataCopyExtParams copyInParamsf = {1, totolRowNum * sizeOfFloat, 0, 0, 0};
@@ -431,12 +437,12 @@ private:
 
             // get coltyp sorted by idxq
             {
-                inputTensor = inQueue.AllocTensor<uint32_t>();
+                auto inputTensor = inQueue.AllocTensor<uint32_t>();
                 DataCopyPad(inputTensor, coltyp, copyInParamsi, copyInPadParamsi);
                 inQueue.EnQue(inputTensor);
 
                 inputTensor = inQueue.DeQue<uint32_t>();
-                outputTensor = outQueue.AllocTensor<uint32_t>();
+                auto outputTensor = outQueue.AllocTensor<uint32_t>();
                 Gather(outputTensor, inputTensor, indexTensor, 0, dNum);
                 inQueue.FreeTensor(inputTensor);
                 outQueue.EnQue(outputTensor);
@@ -462,16 +468,17 @@ private:
 
                 inputTensor = inQueue.DeQue<float>();
                 indexTensor = inQueue.AllocTensor<uint32_t>();
-                auto tmp = outputQueue.AllocTensor<uint32_t>();
+                auto tmp = outQueue.AllocTensor<uint32_t>();
 
-                CreateVecIndex<uint32_t>(indexTensor, 0, dNum);
-                Muls(tmp, indexTensor, 8, dNum);
+                CreateVecIndex<int32_t>(indexTensor.ReinterpretCast<int32_t>(), 0, dNum);
+                Muls<int32_t>(tmp.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), 8, dNum);
                 Scatter(mrglist, inputTensor, tmp, 0, dNum);
 
                 LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>();
                 Scatter(mrglisti, indexTensor, tmp, 4, dNum); // 8n+4
                 inQueue.FreeTensor(indexTensor);
                 inQueue.FreeTensor(inputTensor);
+                outQueue.FreeTensor(tmp);
             }
             // MrgSort the mrglist
             {
@@ -491,42 +498,42 @@ private:
             // get the sorted d and idx
             {
                 const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
-                const DataCopyExtParams copyOutParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+                const DataCopyExtParams copyOutParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
 
                 LocalTensor<float> mrglistf = tmpBuf.Get<float>()[2 * LDN];
-                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>()[2 * LDN;
+                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>()[2 * LDN];
 
                 indexTensor = inQueue.AllocTensor<uint32_t>();
                 outputTensor = outQueue.AllocTensor<float>();
-                outputIndexTensor = outQueue.AllocTensor<uint32_t>();
-                CreateVecIndex<uint32_t>(indexTensor, 0, dNum);
-                Muls(indexTensor, indexTensor, 8, dNum);
+                outIndexTensor = outQueue.AllocTensor<uint32_t>();
+                CreateVecIndex<int32_t>(indexTensor.ReinterpretCast<int32_t>(), 0, dNum);
+                Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), 8, dNum);
                 Gather(outputTensor, mrglistf, indexTensor, 0, dNum);
-                Gather(outputIndexTensor, mrglisti, indexTensor, 4, dNum);
-                outputQueue.EnQue(outputTensor);
-                outputQueue.EnQue(outputIndexTensor);
+                Gather(outIndexTensor, mrglisti, indexTensor, 4, dNum);
+                outQueue.EnQue(outputTensor);
+                outQueue.EnQue(outIndexTensor);
                 inQueue.FreeTensor(indexTensor);
 
                 outputTensor = outQueue.DeQue<float>();
                 DataCopyPad(d[1], outputTensor, copyOutParamsf);
                 outQueue.FreeTensor(outputTensor);
 
-                outputIndexTensor = outQueue.DeQue<uint32_t>();
-                DataCopyPad(idx[1], outputIndexTensor, copyOutParamsi);
-                outQueue.FreeTensor(outputIndexTensor);
+                outIndexTensor = outQueue.DeQue<uint32_t>();
+                DataCopyPad(idx[1], outIndexTensor, copyOutParamsi);
+                outQueue.FreeTensor(outIndexTensor);
             }
         }
 
         // use idx to permute d z and coltype.d has been permuted
         {
-            const DataCopyExtParams copyInParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyInParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
             const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
             indexTensor = inQueue.AllocTensor<uint32_t>();
             DataCopyPad(indexTensor, idx[1], copyInParamsi, copyInPadParamsi);
             inQueue.EnQue(indexTensor);
 
             indexTensor = inQueue.DeQue<uint32_t>();
-            Muls(indexTensor, indexTensor, sizeOfFloat, dNum);
+            Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), sizeOfFloat, dNum);
 
             // permute z
             const DataCopyExtParams copyInParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
@@ -547,7 +554,7 @@ private:
             outQueue.FreeTensor(outputTensor);
 
             // permute coltyp
-            const DataCopyExtParams copyOutParamsi = {1, dNum * sizeof(uint32_t), 0, 0, 0};
+            const DataCopyExtParams copyOutParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
             auto coltypTensor = inQueue.AllocTensor<uint32_t>();
             DataCopyPad(coltypTensor, idxc, copyInParamsi, copyInPadParamsi);
             inQueue.EnQue(coltypTensor);
@@ -565,6 +572,54 @@ private:
             // 释放 indexTensor
             inQueue.FreeTensor(indexTensor);
         }
+
+        // calc tol
+        float tol = max(fabs(alpha), fabs(beta));
+        tol = 8 * EPS * max(fabs(d(dNum)), tol); // the totolRowNum th diagonal
+        k = 0;
+        uint16_t k2 = totolRowNum, jprev, j;
+        // find the first undeflated z
+        for (j = 1; j < totolRowNum; ++j)
+        {
+            if (fabs(z(j)) <= tol)
+            {
+                --k2;
+                idxp(k2) = j;
+                coltyp(j) = 3;
+                if (j == totolRowNum - 1)
+                {
+                    goto label120;
+                }
+            }
+            else
+            {
+                jprev = j;
+                break;
+            }
+        }
+        j = jprev;
+        while (1)
+        {
+            j = j + 1;
+            if (j >= totolRowNum)
+            {
+                break;
+            }
+            if(fabs(z(j)<=tol)){
+                //deflate the z
+                --k2;
+                idxp(k2) = j;
+                coltyp(j) = 3;
+            }
+            else
+            {
+                //check whether can be deflated due to d
+                
+            }
+        }
+
+    label120:
+        return;
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
     {
