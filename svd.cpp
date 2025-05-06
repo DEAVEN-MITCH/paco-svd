@@ -123,7 +123,9 @@ public:
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(inQueue, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(outQueue, BUFFER_NUM, N * sizeOfFloat + 32);
-        pipe.InitBuffer(tmpBuf, 16 * N); // for sort
+        pipe.InitBuffer(tmpBuf1, 8 * N); // for sort
+        pipe.InitBuffer(tmpBuf2, 8 * N); // for sort
+
         // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
         // workspace = workspaceBuf.Get<int32_t>();
@@ -261,12 +263,12 @@ private:
 
     __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &idx, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
     {
-        const uint16_t totolRowNum = leftRowNum + rightRowNum + 1, totolColNum = totolRowNum + isSquare, dNum = totolRowNum - 1;
+        const uint16_t totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = totalRowNum + isSquare, dNum = totalRowNum - 1;
         const uint16_t leftRowNump1 = leftRowNum + 1;
         const uint16_t leftRowNump2 = leftRowNum + 2;
         const uint16_t rightColNum = rightRowNum + 1 - isSquare;
         // form d and z
-        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        RefreshAllCache();
         LocalTensor<float> inputTensor, outputTensor, bindLocalf;
         LocalTensor<uint32_t> indexTensor, outIndexTensor;
 
@@ -399,7 +401,7 @@ private:
             Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), sizeOfFloat, dNum);
 
             // get dsigma
-            const DataCopyExtParams copyInParamsf = {1, totolRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyInParamsf = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
             const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
             const DataCopyExtParams copyOutParams = {1, dNum * sizeOfFloat, 0, 0, 0};
             {
@@ -431,7 +433,7 @@ private:
                 outQueue.EnQue(outputTensor);
 
                 outputTensor = outQueue.DeQue<float>();
-                DataCopyPad(leftSingularMatrix, outputTensor, copyOutParams);
+                DataCopyPad(st, outputTensor, copyOutParams);
                 outQueue.FreeTensor(outputTensor);
             }
 
@@ -461,7 +463,7 @@ private:
             {
                 const DataCopyExtParams copyInParams = {1, dNum * sizeOfFloat, 0, 0, 0};
                 const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
-                LocalTensor<float> mrglist = tmpBuf.Get<float>();
+                LocalTensor<float> mrglist = tmpBuf1.Get<float>();
                 inputTensor = inQueue.AllocTensor<float>();
                 DataCopyPad(inputTensor, dsigma, copyInParams, copyInPadParams);
                 inQueue.EnQue(inputTensor);
@@ -472,9 +474,11 @@ private:
 
                 CreateVecIndex<int32_t>(indexTensor.ReinterpretCast<int32_t>(), 0, dNum);
                 Muls<int32_t>(tmp.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), 8, dNum);
+                // because the dsigma is in ascending order,so we need to mul by -1 to make it in descending order
+                Muls<float>(inputTensor, inputTensor, -1, dNum);
                 Scatter(mrglist, inputTensor, tmp, 0, dNum);
 
-                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>();
+                LocalTensor<uint32_t> mrglisti = tmpBuf1.Get<uint32_t>();
                 Scatter(mrglisti, indexTensor, tmp, 4, dNum); // 8n+4
                 inQueue.FreeTensor(indexTensor);
                 inQueue.FreeTensor(inputTensor);
@@ -482,8 +486,8 @@ private:
             }
             // MrgSort the mrglist
             {
-                LocalTensor<float> workTensor = tmpBuf.Get<float>();
-                LocalTensor<float> dstTensor = workTensor[2 * LDN]; // the other half of tmpBuf
+                LocalTensor<float> workTensor = tmpBuf1.Get<float>();
+                LocalTensor<float> dstTensor = tmpBuf2.Get<float>();
                 MrgSortSrcList<float> mrgSortSrcList;
                 mrgSortSrcList.src1 = workTensor;
                 mrgSortSrcList.src2 = workTensor[leftRowNum];
@@ -500,8 +504,8 @@ private:
                 const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
                 const DataCopyExtParams copyOutParamsi = {1, dNum * sizeOfUint32_t, 0, 0, 0};
 
-                LocalTensor<float> mrglistf = tmpBuf.Get<float>()[2 * LDN];
-                LocalTensor<uint32_t> mrglisti = tmpBuf.Get<uint32_t>()[2 * LDN];
+                LocalTensor<float> mrglistf = tmpBuf2.Get<float>();
+                LocalTensor<uint32_t> mrglisti = tmpBuf2.Get<uint32_t>();
 
                 indexTensor = inQueue.AllocTensor<uint32_t>();
                 outputTensor = outQueue.AllocTensor<float>();
@@ -509,6 +513,8 @@ private:
                 CreateVecIndex<int32_t>(indexTensor.ReinterpretCast<int32_t>(), 0, dNum);
                 Muls<int32_t>(indexTensor.ReinterpretCast<int32_t>(), indexTensor.ReinterpretCast<int32_t>(), 8, dNum);
                 Gather(outputTensor, mrglistf, indexTensor, 0, dNum);
+                // 因为之前乘了-1来归并排序，所以这里需要乘以-1变成升序
+                Muls<float>(outputTensor, outputTensor, -1, dNum);
                 Gather(outIndexTensor, mrglisti, indexTensor, 4, dNum);
                 outQueue.EnQue(outputTensor);
                 outQueue.EnQue(outIndexTensor);
@@ -540,7 +546,7 @@ private:
             const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
             const DataCopyExtParams copyOutParamsf = {1, dNum * sizeOfFloat, 0, 0, 0};
             inputTensor = inQueue.AllocTensor<float>();
-            DataCopyPad(inputTensor, leftSingularMatrix, copyInParamsf, copyInPadParamsf);
+            DataCopyPad(inputTensor, st, copyInParamsf, copyInPadParamsf);
             inQueue.EnQue(inputTensor);
 
             inputTensor = inQueue.DeQue<float>();
@@ -575,18 +581,19 @@ private:
 
         // calc tol
         float tol = max(fabs(alpha), fabs(beta));
-        tol = 8 * EPS * max(fabs(d(dNum)), tol); // the totolRowNum th diagonal
+        tol = 8 * EPS * max(fabs(d(dNum)), tol); // the totalRowNum th diagonal
         k = 0;
-        uint16_t k2 = totolRowNum, jprev, j;
+        uint16_t k2 = totalRowNum, jprev, j, idxjp, idxj;
+        float c, s, tau;
         // find the first undeflated z
-        for (j = 1; j < totolRowNum; ++j)
+        for (j = 1; j < totalRowNum; ++j)
         {
             if (fabs(z(j)) <= tol)
             {
                 --k2;
                 idxp(k2) = j;
                 coltyp(j) = 3;
-                if (j == totolRowNum - 1)
+                if (j == totalRowNum - 1)
                 {
                     goto label120;
                 }
@@ -601,24 +608,77 @@ private:
         while (1)
         {
             j = j + 1;
-            if (j >= totolRowNum)
+            if (j >= totalRowNum)
             {
                 break;
             }
-            if(fabs(z(j)<=tol)){
-                //deflate the z
+            if (fabs(z(j)) <= tol)
+            {
+                // deflate the z
                 --k2;
                 idxp(k2) = j;
                 coltyp(j) = 3;
             }
             else
             {
-                //check whether can be deflated due to d
-                
+                // check whether can be deflated due to d
+                if (fabs(d(j) - d(jprev)) <= tol)
+                {
+                    // deflate due to close d
+                    s = z(jprev);
+                    c = z(j);
+                    tau = sqrt(c * c + s * s);
+                    c = c / tau;
+                    s = -s / tau;
+                    // deflate the jprev,use j as new jprev
+                    z(j) = tau;
+                    z(jprev) = 0;
+                    // update the left singular matrix
+                    idxjp = idxq(idx(jprev) + 1);
+                    idxj = idxq(idx(j) + 1);
+                    if (idxjp < leftRowNump1)
+                    {
+                        --idxjp;
+                    }
+                    if (idxj < leftRowNump1)
+                    {
+                        --idxj;
+                    }
+                    // rotate leftSingularMatrix and rightSingularMatrix
+                    // row jp=c rowjp+s rowj
+                    // row j= -s rowjp+c rowj
+                    rotateRow(totalRowNum, leftSingularMatrix[idxjp * LDN], leftSingularMatrix[idxj * LDN], c, s);
+                    rotateRow(totalColNum, rightSingularMatrix[idxjp * LDN], rightSingularMatrix[idxj * LDN], c, s);
+
+                    if (coltyp(j) != coltyp(jprev))
+                    {
+                        coltyp(j) = 2;
+                    }
+                    coltyp(jprev) = 3;
+                    --k2;
+                    idxp(k2) = jprev;
+                    jprev = j;
+                }
+                else
+                {
+                    // record the iprev as undeflated,and update jprev
+                    ++k;
+                    // begin from 1.
+                    st(k) = z(jprev);
+                    dsigma(k) = d(jprev);
+                    idxp(k) = jprev;
+                    jprev = j;
+                }
             }
         }
-
+        // record the last singular value
+        ++k;
+        st(k) = z(jprev);
+        dsigma(k) = d(jprev);
+        idxp(k) = jprev;
     label120:
+
+        ++k; // k functions as index before,now it functions as the number of nondeflated cols
         return;
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
@@ -659,8 +719,8 @@ private:
     __aicore__ inline void compute_2x3_svd(GlobalTensor<float> &qt, GlobalTensor<float> &wt, GlobalTensor<float> &d, GlobalTensor<float> &e, GlobalTensor<uint32_t> &idxq, GlobalTensor<float> &f, GlobalTensor<float> &l)
     {
         float a11 = d(0), a12 = e(0), a22 = d(1), a23 = e(1);
-        idxq(0) = 0;
-        idxq(1) = 1;
+        idxq(0) = 1;
+        idxq(1) = 0;
         if (a11 == 0 && a12 == 0 && a22 == 0 && a23 == 0)
         {
             // rank0
@@ -760,8 +820,8 @@ private:
     {
         float a11 = d(0), a12 = e(0), a22 = d(1);
 
-        idxq(0) = 0;
-        idxq(1) = 1;
+        idxq(0) = 1;
+        idxq(1) = 0;
         if (a11 == 0 && a12 == 0 && a22 == 0)
         {
             // rank 0
@@ -905,7 +965,7 @@ private:
         // update UVt from Q Wt
         // LDN columns of U  are updated
         // all rows of Vt are updated
-        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+        RefreshAllCache();
         printf("before updateUVt\n");
         singleDumpTensor(uGm, 1024);
         singleDumpTensor(vtGm, 1024);
@@ -999,6 +1059,49 @@ private:
         svdStackGm(2 * idx) = info.start_col;
         svdStackGm(2 * idx + 1) = info.end_col;
     }
+    // x'=cx+sy, y'=-sx+cy
+    __aicore__ inline void rotateRow(uint16_t rowLen, GlobalTensor<float> x, GlobalTensor<float> y, float c, float s)
+    {
+        const DataCopyExtParams copyInParams = {1, rowLen * sizeOfFloat, 0, 0, 0};
+        const DataCopyExtParams copyOutParams = {1, rowLen * sizeOfFloat, 0, 0, 0};
+        const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+        LocalTensor<float> xin, yin, xout, yout, tmp1, tmp2;
+        tmp1 = tmpBuf1.Get<float>();
+        tmp2 = tmpBuf2.Get<float>();
+        xin = inQueue.AllocTensor<float>();
+        DataCopyPad(xin, x, copyInParams, copyInPadParams);
+        yin = inQueue.AllocTensor<float>();
+        DataCopyPad(yin, y, copyInParams, copyInPadParams);
+        inQueue.EnQue(xin);
+        inQueue.EnQue(yin);
+
+        xin = inQueue.DeQue<float>();
+        yin = inQueue.DeQue<float>();
+        xout = outQueue.AllocTensor<float>();
+        yout = outQueue.AllocTensor<float>();
+        Muls(tmp1, xin, c, rowLen);
+        Muls(tmp2, yin, s, rowLen);
+        Add(xout, tmp1, tmp2, rowLen);
+        Muls(tmp1, xin, -s, rowLen);
+        Muls(tmp2, yin, c, rowLen);
+        Add(yout, tmp1, tmp2, rowLen);
+        outQueue.EnQue(xout);
+        outQueue.EnQue(yout);
+        inQueue.FreeTensor(xin);
+        inQueue.FreeTensor(yin);
+
+        xout = outQueue.DeQue<float>();
+        yout = outQueue.DeQue<float>();
+        DataCopyPad(x, xout, copyOutParams);
+        DataCopyPad(y, yout, copyOutParams);
+        outQueue.FreeTensor(xout);
+        outQueue.FreeTensor(yout);
+    }
+
+    __aicore__ inline void RefreshAllCache()
+    {
+        AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(uGm);
+    }
 
 private:
     uint16_t LDM, LDN;
@@ -1021,7 +1124,7 @@ private:
     const uint8_t blockIdx, blockNum;
     TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
     TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
-    TBuf<TPosition::VECCALC> tmpBuf;
+    TBuf<TPosition::VECCALC> tmpBuf1, tmpBuf2;
     TQueBind<TPosition::VECIN, TPosition::VECOUT, BUFFER_NUM> copyBind;
     // TBuf<TPosition::VECCALC> svdWorkspaceBuf;
     SVDTiling *svdTiling;
