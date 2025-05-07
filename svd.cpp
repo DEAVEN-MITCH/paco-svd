@@ -245,19 +245,73 @@ private:
         auto idx = idxGm[leftSubMatrix.start_col];
         auto coltyp = coltypGm[leftSubMatrix.start_col];
         auto dsigma = dsigmaGm[leftSubMatrix.start_col];
-        // TODO scale for stability
+        // scale for stability,make later deflation tol calculation feasible
+        float orgnrm = max(fabs(alpha), fabs(beta));
+        uint16_t totalRowNum = leftColNum + rightColNum - 1 + isSquare;
+        d(leftColNum - 1) = 0.0f;
+        for (auto i = 0; i < totalRowNum; i++)
+        {
+            if (fabs(d(i)) > orgnrm)
+            {
+                orgnrm = fabs(d(i));
+            }
+        }
+        alpha /= orgnrm;
+        beta /= orgnrm;
+        { // scale d by orgnrm
+            RefreshAllCache();
+            const DataCopyExtParams copyInParams = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParams = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+            LocalTensor<float> inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, d, copyInParams, copyInPadParams);
+            inQueue.EnQue(inputTensor);
 
-        // rotate to remove the N+1 column if necessary
+            inputTensor = inQueue.DeQue<float>();
+            auto outputTensor = outQueue.AllocTensor<float>();
+            Muls<float>(outputTensor, inputTensor, 1.0f / orgnrm, totalRowNum);
+            inQueue.FreeTensor(inputTensor);
+            outQueue.EnQue(outputTensor);
+
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(d, outputTensor, copyOutParams);
+            outQueue.FreeTensor(outputTensor);
+        }
+
         // get idxq
         // sort d and get another permutation
         // deflate z1
         // deflate z and d
+        // rotate to remove the N+1th column if necessary
         // permute qt and wt
         Deflation(leftColNum - 1, rightColNum - 1 + isSquare, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, idx, coltyp, dsigma);
 
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
+        auto tmpSpace = aGm[leftSubMatrix.start_col];
+        MergeSubMatrix_step2(k, leftColNum, rightColNum, isSquare, leftSingularMatrix, rightSingularMatrix, d, st, gt, f, l, idxq, idxc, coltyp, dsigma, tmpSpace);
+
+        { // unscale d
+            RefreshAllCache();
+            const DataCopyExtParams copyInParams = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyOutParams = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+            LocalTensor<float> inputTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(inputTensor, d, copyInParams, copyInPadParams);
+            inQueue.EnQue(inputTensor);
+
+            inputTensor = inQueue.DeQue<float>();
+            auto outputTensor = outQueue.AllocTensor<float>();
+            Muls<float>(outputTensor, inputTensor, orgnrm, totalRowNum);
+            inQueue.FreeTensor(inputTensor);
+            outQueue.EnQue(outputTensor);
+
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(d, outputTensor, copyOutParams);
+            outQueue.FreeTensor(outputTensor);
+        }
+
         return;
     }
 
@@ -328,14 +382,14 @@ private:
             outQueue.FreeTensor(outIndexTensor);
         }
         // the second part of d z and idxq
-        // z[i]=l[i]*beta
+        // z[i]=f[i]*beta
         // leftRowNump1 is also the shift of the second part
         {
             const DataCopyExtParams copyInParams = {1, rightColNum * sizeOfFloat, 0, 0, 0};
             const DataCopyExtParams copyOutParams = {1, rightColNum * sizeOfFloat, 0, 0, 0};
             const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0};
             inputTensor = inQueue.AllocTensor<float>();
-            DataCopyPad(inputTensor, l[leftRowNump1], copyInParams, copyInPadParams);
+            DataCopyPad(inputTensor, f[leftRowNump1], copyInParams, copyInPadParams);
             inQueue.EnQue(inputTensor);
 
             inputTensor = inQueue.DeQue<float>();
@@ -867,6 +921,10 @@ private:
                     outQueue.FreeTensor(outputTensor);
                     outQueue.FreeTensor(outputTensor2);
                 }
+                // copy the last row of gt to the last row of rightSingularMatrix and form l and f
+                copyRow(totalColNum, gt[(totalColNum - 1) * LDN], rightSingularMatrix[(totalColNum - 1) * LDN]);
+                f(totalColNum - 1) = gt((totalColNum - 1) * LDN);
+                l(totalColNum - 1) = gt((totalColNum - 1) * LDN + totalColNum - 1);
             }
             else
             {
@@ -884,10 +942,14 @@ private:
             RefreshAllCache();
             copyRow(totalRowNum - k, dsigma[k], d[k]);
             // copy totalRowNum-k rows of left singular vects and right singular vects
+            // copy st/gt to leftSingularMatrix/rightSingularMatrix
+            // update the corresponding f and l
             for (int j = k; j < totalRowNum; ++j)
             {
                 copyRow(totalRowNum, st[j * LDN], leftSingularMatrix[j * LDN]);
                 copyRow(totalColNum, gt[j * LDN], rightSingularMatrix[j * LDN]);
+                f(j) = gt(j * LDN);
+                l(j) = gt(j * LDN + totalColNum - 1);
             }
         }
 
@@ -895,6 +957,55 @@ private:
     }
     __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
     {
+    }
+    __aicore__ inline void MergeSubMatrix_step2(const uint16_t k, const uint16_t leftColNum, const uint16_t rightColNum, const bool isSquare, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &d, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &ctot, GlobalTensor<float> &dsigma, GlobalTensor<float> &tmpSpace)
+    {
+        const auto leftRowNum = leftColNum - 1, rightRowNum = rightColNum - 1 + isSquare, totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = leftColNum + rightColNum;
+        if (k == 1)
+        {
+            // quick solve 1x1 svd
+            d(0) = fabs(z(0));
+            // copy st and gt to leftSingularMatrix and rightSingularMatrix
+            copyRow(totalColNum, gt[0], rightSingularMatrix[0]);
+            f(0) = gt(0);
+            l(0) = gt(totalColNum - 1);
+            bool isNeg = z(0) < 0;
+            if (isNeg)
+            {
+                // st[0]*=-1搬到leftSingularMatrix[0]
+                const DataCopyExtParams copyInParamsf = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+                const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+                const DataCopyExtParams copyOutParamsf = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, st[0], copyInParamsf, copyInPadParamsf);
+                inQueue.EnQue(inputTensor);
+
+                outputTensor = outQueue.AllocTensor<float>();
+                inputTensor = inQueue.DeQue<float>();
+                Muls<float>(outputTensor, inputTensor, -1, totalRowNum);
+                outQueue.EnQue(outputTensor);
+                inQueue.FreeTensor(inputTensor);
+
+                outputTensor = outQueue.DeQue<float>();
+                DataCopyPad(leftSingularMatrix[0], outputTensor, copyOutParamsf);
+                outQueue.FreeTensor(outputTensor);
+            }
+            else
+            {
+                copyRow(totalRowNum, st[0], leftSingularMatrix[0]);
+            }
+
+            goto FormIdxq;
+        }
+    // first solve the singular values,roots of secular equation
+
+    // use lowner to compute z'
+    // compute the left and right singular vectors
+    // multiply with prior orthonormal matrix to get the final left and right singular vectors
+    // update the l and f as well
+    // sort new d to form idxq
+    FormIdxq:
+        return;
     }
 
     __aicore__ inline void compute_base_case_svd(const SVDSubmatrixInfo &subMatrix)
@@ -1329,8 +1440,8 @@ private:
 
 private:
     uint16_t LDM, LDN;
-    // in the beginning u and vt are orthogonal matrix, generated by bidiagonalization
-    // qt and wt are orthogonal matrix, generated by BDC
+    // in the beginning u and vt are orthonormal matrix, generated by bidiagonalization
+    // qt and wt are orthonormal matrix, generated by BDC
     // altogether,the singular matrix are uq,wtvt which
     // would in the end be stored in uGm and vtGm
     // d would be used to store singular values,and e would store the intermediate z;
