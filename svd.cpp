@@ -24,6 +24,7 @@ constexpr int32_t BlockSize = 32;
 constexpr int32_t BlockFloatCnt = BlockSize / sizeOfFloat;
 constexpr int32_t SizePerOperation = 256;
 constexpr int32_t BlockNumPerOperation = SizePerOperation / BlockSize;
+constexpr int32_t MaxIter = 10;
 using namespace AscendC;
 using namespace matmul;
 
@@ -123,8 +124,8 @@ public:
         pipe.InitBuffer(copyBind, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(inQueue, BUFFER_NUM, N * sizeOfFloat + 32);
         pipe.InitBuffer(outQueue, BUFFER_NUM, N * sizeOfFloat + 32);
-        pipe.InitBuffer(tmpBuf1, 8 * N); // for sort
-        pipe.InitBuffer(tmpBuf2, 8 * N); // for sort
+        pipe.InitBuffer(tmpBuf1, 8 * N + 96); // for sort
+        pipe.InitBuffer(tmpBuf2, 8 * N + 96); // for sort
 
         // pipe.InitBuffer(workspaceBuf, blockNum * 32);
 
@@ -289,8 +290,8 @@ private:
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
-        auto tmpSpace = aGm[leftSubMatrix.start_col];
-        MergeSubMatrix_step2(k, leftColNum, rightColNum, isSquare, leftSingularMatrix, rightSingularMatrix, d, st, gt, f, l, idxq, idxc, coltyp, dsigma, tmpSpace);
+        auto tmpSpace = tmpGm[leftSubMatrix.start_col];
+        MergeSubMatrix_step2(k, leftColNum, rightColNum, isSquare, leftSingularMatrix, rightSingularMatrix, d, st, gt, f, l, idxq, idxc, coltyp, dsigma, z, tmpSpace);
 
         { // unscale d
             RefreshAllCache();
@@ -955,12 +956,342 @@ private:
 
         return;
     }
-    __aicore__ inline void SecularEquationSolver(float sigma, float beta, float alpha, float &sigma1, float &sigma2)
+
+    __aicore__ inline void SecularEquationSolver(const uint16_t n, const uint16_t i, const GlobalTensor<float> &dsigma, const GlobalTensor<float> &z, const GlobalTensor<float> &tmpSpace, const GlobalTensor<float> &d)
     {
+        LocalTensor<float> inputTensor, outputTensor;
+        float miu, omega, di, dip1, dChosen, di2, dip12;
+        // actual d stored in dsigma,tmp1 stores delta dj-di or dj-dip1,tmp2 stores dj+di or dj+dip1
+        if (i != n - 1)
+        {
+            float psi1, psi2, c1, c2, c3, psi1derivative, psi2derivative, c1hat, c2hat, result, tol;
+            const uint16_t leftNums = i + 1, rightNums = n - i - 1;
+            const uint16_t leftUpperLength = (leftNums + BlockFloatCnt - 1) / BlockFloatCnt * BlockFloatCnt;
+            const uint16_t rightUpperLength = (rightNums + BlockFloatCnt - 1) / BlockFloatCnt * BlockFloatCnt;
+            // tmpBuf1 is for delta and work
+            LocalTensor<float> leftDelta = tmpBuf1.Get<float>();
+            LocalTensor<float> rightDelta = leftDelta[leftUpperLength];
+            LocalTensor<float> leftWork = rightDelta[rightUpperLength];
+            LocalTensor<float> rightWork = leftWork[leftUpperLength];
+            // tmpBuf2 is for z and otherTmp
+            LocalTensor<float> leftZ2 = tmpBuf2.Get<float>();
+            LocalTensor<float> rightZ2 = leftZ2[leftUpperLength];
+            LocalTensor<float> leftOtherTmp = rightZ2[rightUpperLength];
+            LocalTensor<float> rightOtherTmp = leftOtherTmp[leftUpperLength];
+
+            const DataCopyExtParams copyInParams1 = {1, leftNums * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams1 = {1, leftNums * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams1 = {true, 0, 0, 0.0f};
+            const DataCopyExtParams copyInParams2 = {1, rightNums * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams2 = {1, rightNums * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams2 = {true, 0, 0, 0.0f};
+            di = dsigma(i);
+            dip1 = dsigma(i + 1);
+            di2 = di * di;
+            dip12 = dip1 * dip1;
+            omega = (di + dip1) / 2;
+            // decide whether use dj+di or dj+dip1 and the definition of delta
+            result = 0.0f;
+            // init  delta,work to d,z2 to z^2
+            {
+                inputTensor = inQueue.AllocTensor<float>();
+                auto inputTensor2 = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, dsigma, copyInParams1, copyInPadParams1);
+                DataCopyPad(inputTensor2, dsigma[leftNums], copyInParams2, copyInPadParams2);
+                inQueue.EnQue(inputTensor);
+                inQueue.EnQue(inputTensor2);
+
+                inputTensor = inQueue.DeQue<float>();
+                inputTensor2 = inQueue.DeQue<float>();
+                // DataCopy requires 32B align,use Adds instead
+                Adds<float>(leftDelta, inputTensor, 0.0f, leftNums);
+                Adds<float>(leftWork, inputTensor, 0.0f, leftNums);
+                Adds<float>(rightDelta, inputTensor2, 0.0f, rightNums);
+                Adds<float>(rightWork, inputTensor2, 0.0f, rightNums);
+                inQueue.FreeTensor(inputTensor);
+                inQueue.FreeTensor(inputTensor2);
+                // init z2 to z^2
+                inputTensor = inQueue.AllocTensor<float>();
+                inputTensor2 = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, z, copyInParams1, copyInPadParams1);
+                DataCopyPad(inputTensor2, z[leftNums], copyInParams2, copyInPadParams2);
+                inQueue.EnQue(inputTensor);
+                inQueue.EnQue(inputTensor2);
+
+                inputTensor = inQueue.DeQue<float>();
+                inputTensor2 = inQueue.DeQue<float>();
+                Mul(leftZ2, inputTensor, inputTensor, leftNums);
+                Mul(rightZ2, inputTensor2, inputTensor2, rightNums);
+                inQueue.FreeTensor(inputTensor);
+                inQueue.FreeTensor(inputTensor2);
+            }
+            {
+                // psi1(omega)
+                inputTensor = inQueue.AllocTensor<float>();
+                Adds<float>(leftOtherTmp, leftDelta, -omega, leftNums);
+                Adds<float>(inputTensor, leftWork, omega, leftNums);
+                Mul(leftOtherTmp, leftOtherTmp, inputTensor, leftNums); // d^2-omega^2
+                Div(leftOtherTmp, leftZ2, leftOtherTmp, leftNums);
+                ReduceSum(leftOtherTmp, leftOtherTmp, inputTensor, leftNums);
+                inQueue.FreeTensor(inputTensor);
+                psi1 = leftOtherTmp(0);
+            }
+            {
+                // psi2(omega)
+                inputTensor = inQueue.AllocTensor<float>();
+                Adds<float>(rightOtherTmp, rightDelta, -omega, rightNums);
+                Adds<float>(inputTensor, rightWork, omega, rightNums);
+                Mul(rightOtherTmp, rightOtherTmp, inputTensor, rightNums); // d^2-omega^2
+                Div(rightOtherTmp, rightZ2, rightOtherTmp, rightNums);
+                ReduceSum(rightOtherTmp, rightOtherTmp, inputTensor, rightNums);
+                inQueue.FreeTensor(inputTensor);
+                psi2 = rightOtherTmp(0);
+            }
+            result = 1.0f + psi1 + psi2;
+            if (result > 0)
+            {
+                // delta = dj-di,work=dj+di,dChosen=di
+                dChosen = di;
+            }
+            else
+            {
+                // delta=dj-dip1,work=dj+dip1,dChosen=dip1
+                dChosen = dip1;
+            }
+            // get final delta,work
+            {
+                Adds<float>(leftDelta, leftDelta, -dChosen, leftNums);
+                Adds<float>(rightDelta, rightDelta, -dChosen, rightNums);
+                Adds<float>(leftWork, leftWork, dChosen, leftNums);
+                Adds<float>(rightWork, rightWork, dChosen, rightNums);
+            }
+            // get first miu
+            miu = omega - dChosen;
+            tol = 8.0f * (psi2 - psi1 + 1.0f) * n * EPS;
+            uint16_t iter = 0;
+            while (fabs(result) > tol && iter < MaxIter)
+            {
+                iter++;
+                // calc psi1derivative psi2derivative,c1c2c3
+                {
+                    // psi1derivative
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(leftOtherTmp, leftDelta, -miu, leftNums);
+                    Adds<float>(inputTensor, leftWork, miu, leftNums);
+                    Mul(leftOtherTmp, leftOtherTmp, inputTensor, leftNums); // d^2-omega^2
+                    Mul(leftOtherTmp, leftOtherTmp, leftOtherTmp, leftNums);
+                    Div(leftOtherTmp, leftZ2, leftOtherTmp, leftNums);
+                    ReduceSum(leftOtherTmp, leftOtherTmp, inputTensor, leftNums);
+                    inQueue.FreeTensor(inputTensor);
+                    psi1derivative = leftOtherTmp(0);
+                }
+                {
+                    // psi2derivative
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(rightOtherTmp, rightDelta, -miu, rightNums);
+                    Adds<float>(inputTensor, rightWork, miu, rightNums);
+                    Mul(rightOtherTmp, rightOtherTmp, inputTensor, rightNums); // d^2-omega^2
+                    Mul(rightOtherTmp, rightOtherTmp, rightOtherTmp, rightNums);
+                    Div(rightOtherTmp, rightZ2, rightOtherTmp, rightNums);
+                    ReduceSum(rightOtherTmp, rightOtherTmp, inputTensor, rightNums);
+                    inQueue.FreeTensor(inputTensor);
+                    psi2derivative = rightOtherTmp(0);
+                }
+                float coeff1 = (leftDelta(leftNums - 1) - miu) * (leftWork(leftNums - 1) + miu);
+                c1 = psi1derivative * coeff1 * coeff1;
+                c1hat = psi1 - psi1derivative * coeff1;
+                coeff1 = (rightDelta(0) - miu) * (rightWork(0) + miu);
+                c2 = psi2derivative * coeff1 * coeff1;
+                c2hat = psi2 - psi2derivative * coeff1;
+                c3 = 1 + c1hat + c2hat;
+
+                // calc coeffs of quadratic equation
+                float a = c3, negb = c1 + c2 + c3 * di2 + c3 * dip12, c = c1 * dip12 + c2 * di2 + c3 * di2 * dip12;
+                float lambda1, lambda2;
+                if (negb >= 0)
+                {
+                    lambda1 = (negb + sqrt(negb * negb - 4 * a * c)) / (2 * a);
+                    lambda2 = 2 * c / (negb + sqrt(negb * negb - 4 * a * c));
+                }
+                else
+                {
+                    lambda1 = 2 * c / (negb - sqrt(negb * negb - 4 * a * c));
+                    lambda2 = (negb - sqrt(negb * negb - 4 * a * c)) / (2 * a);
+                }
+                // get the new miu
+                if (lambda1 > di && lambda1 < dip1)
+                {
+                    miu = sqrt(lambda1) - dChosen;
+                }
+                else if (lambda2 > di && lambda2 < dip1)
+                {
+                    miu = sqrt(lambda2) - dChosen;
+                }
+                else
+                {
+                    printf("panic:in SecularEquationSolver,lambda1:%f,lambda2:%f,di:%f,dip1:%f\n", lambda1, lambda2, di, dip1);
+                    miu = sqrt(lambda1) - dChosen;
+                }
+
+                // calculate new psi1,psi2,result
+                {
+                    // psi1(miu)
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(leftOtherTmp, leftDelta, -miu, leftNums);
+                    Adds<float>(inputTensor, leftWork, miu, leftNums);
+                    Mul(leftOtherTmp, leftOtherTmp, inputTensor, leftNums); // d^2-omega^2
+                    Div(leftOtherTmp, leftZ2, leftOtherTmp, leftNums);
+                    ReduceSum(leftOtherTmp, leftOtherTmp, inputTensor, leftNums);
+                    inQueue.FreeTensor(inputTensor);
+                    psi1 = leftOtherTmp(0);
+                }
+                {
+                    // psi2(miu)
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(rightOtherTmp, rightDelta, -miu, rightNums);
+                    Adds<float>(inputTensor, rightWork, miu, rightNums);
+                    Mul(rightOtherTmp, rightOtherTmp, inputTensor, rightNums); // d^2-omega^2
+                    Div(rightOtherTmp, rightZ2, rightOtherTmp, rightNums);
+                    ReduceSum(rightOtherTmp, rightOtherTmp, inputTensor, rightNums);
+                    inQueue.FreeTensor(inputTensor);
+                    psi2 = rightOtherTmp(0);
+                }
+                result = 1.0f + psi1 + psi2;
+                tol = 8.0f * (psi2 - psi1 + 1.0f) * n * EPS;
+            }
+            // update d and tmpSpace
+            d(i) = dChosen + miu;
+            // store d^2-sigma^2 in tmpSpace
+            { // left
+                inputTensor = inQueue.AllocTensor<float>();
+                outputTensor = outQueue.AllocTensor<float>();
+                Adds<float>(leftOtherTmp, leftDelta, -miu, leftNums);
+                Adds<float>(inputTensor, leftWork, miu, leftNums);
+                Mul(outputTensor, leftOtherTmp, inputTensor, leftNums); // d^2-omega^2
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+                DataCopyPad(tmpSpace, outputTensor, copyOutParams1);
+                outQueue.FreeTensor(outputTensor);
+            }
+            { // right
+                inputTensor = inQueue.AllocTensor<float>();
+                outputTensor = outQueue.AllocTensor<float>();
+                Adds<float>(rightOtherTmp, rightDelta, -miu, rightNums);
+                Adds<float>(inputTensor, rightWork, miu, rightNums);
+                Mul(outputTensor, rightOtherTmp, inputTensor, rightNums); // d^2-omega^2
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+                DataCopyPad(tmpSpace[leftNums], outputTensor, copyOutParams2);
+                outQueue.FreeTensor(outputTensor);
+            }
+        }
+        else
+        {
+            // i==n-1
+            float znorm, psi, psiderivative, c1, c1hat, tol, result;
+            const uint16_t UpperLen = (n + BlockFloatCnt - 1) / BlockFloatCnt * BlockFloatCnt;
+            di = dsigma(i);
+            di2 = di * di;
+            LocalTensor<float> delta = tmpBuf1.Get<float>();
+            LocalTensor<float> work = Delta[UpperLen];
+            LocalTensor<float> z2 = tmpBuf2.Get<float>();
+            LocalTensor<float> otherTmp = Z2[UpperLen];
+            LocalTensor<float> inputTensor, outputTensor;
+            const DataCopyExtParams copyInParams = {1, n * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyOutParams = {1, n * sizeOfFloat, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParams = {true, 0, 0, 0.0f};
+            { // get Delta and Work
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, dsigma, copyInParams, copyInPadParams);
+                inQueue.EnQue(inputTensor);
+                inputTensor = inQueue.DeQue<float>();
+                Adds(delta, inputTensor, -di, n);
+                Adds(work, inputTensor, di, n);
+                inQueue.FreeTensor(inputTensor);
+
+                inputTensor = inQueue.AllocTensor<float>();
+                DataCopyPad(inputTensor, z, copyInParams, copyInPadParams);
+                inQueue.EnQue(inputTensor);
+
+                inputTensor = inQueue.DeQue<float>();
+                Mul(z2, inputTensor, inputTensor, n);
+                ReduceSum(otherTmp, z2, inputTensor, n);
+                inQueue.FreeTensor(inputTensor);
+                znorm = otherTmp(0);
+            }
+            dip1 = dsigma(i) + znorm;
+            dip12 = dip1 * dip1;
+            miu = znorm / 2.0f;
+            // calc psi,result
+            {
+                inputTensor = inQueue.AllocTensor<float>();
+                Adds(otherTmp, delta, -miu, n);
+                Adds(inputTensor, work, miu, n);
+                Mul(otherTmp, otherTmp, inputTensor, n); // d^2-omega^2
+                Div(otherTmp, z2, otherTmp, n);
+                ReduceSum(otherTmp, otherTmp, inputTensor, n);
+                inQueue.FreeTensor(inputTensor);
+                psi = otherTmp(0);
+            }
+            result = 1.0f + psi; // psi<0
+            tol = 8.0f * (fabs(psi) + 1.0f) * n * EPS;
+            // calc c1,c1hat
+            uint16_t iter = 0;
+            while (fabs(result - 1.0f) > tol && iter < MaxIter)
+            {
+                ++iter;
+                {
+                    // psiderivative
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(otherTmp, delta, -miu, n);
+                    Adds<float>(inputTensor, work, miu, n);
+                    Mul(otherTmp, otherTmp, inputTensor, n); // d^2-omega^2
+                    Mul(otherTmp, otherTmp, otherTmp, n);
+                    Div(otherTmp, z2, otherTmp, n);
+                    ReduceSum(otherTmp, otherTmp, inputTensor, n);
+                    inQueue.FreeTensor(inputTensor);
+                    psiderivative = otherTmp(0);
+                }
+                // calc c1,c1hat
+                float coeff1 = (delta(n - 1) - miu) * (work(n - 1) + miu);
+                c1 = psiderivative * coeff1 * coeff1;
+                c1hat = psi - psiderivative * coeff1;
+                miu = sqrt(di2 + c1 / (c1hat + 1.0f)) - di;
+
+                // calc new psi,result
+                {
+                    inputTensor = inQueue.AllocTensor<float>();
+                    Adds<float>(otherTmp, delta, -miu, n);
+                    Adds<float>(inputTensor, work, miu, n);
+                    Mul(otherTmp, otherTmp, inputTensor, n); // d^2-omega^2
+                    Div(otherTmp, z2, otherTmp, n);
+                    ReduceSum(otherTmp, otherTmp, inputTensor, n);
+                    inQueue.FreeTensor(inputTensor);
+                    psi = otherTmp(0);
+                }
+                result = 1.0f + psi;
+                tol = 8.0f * (fabs(psi) + 1.0f) * n * EPS;
+            }
+            // update d and tmpSpace
+            d(i) = di + miu;
+            // store d^2-sigma^2 in tmpSpace
+            {
+                inputTensor = inQueue.AllocTensor<float>();
+                outputTensor = outQueue.AllocTensor<float>();
+                Adds<float>(otherTmp, delta, -miu, n);
+                Adds<float>(inputTensor, work, miu, n);
+                Mul(outputTensor, otherTmp, inputTensor, n); // d^2-omega^2
+                inQueue.FreeTensor(inputTensor);
+                outQueue.EnQue(outputTensor);
+                DataCopyPad(tmpSpace, outputTensor, copyOutParams);
+                outQueue.FreeTensor(outputTensor);
+            }
+        }
     }
-    __aicore__ inline void MergeSubMatrix_step2(const uint16_t k, const uint16_t leftColNum, const uint16_t rightColNum, const bool isSquare, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &d, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &ctot, GlobalTensor<float> &dsigma, GlobalTensor<float> &tmpSpace)
+    __aicore__ inline void MergeSubMatrix_step2(const uint16_t k, const uint16_t leftColNum, const uint16_t rightColNum, const bool isSquare, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &d, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &ctot, GlobalTensor<float> &dsigma, GlobalTensor<float> &z, GlobalTensor<float> &tmpSpace)
     {
         const auto leftRowNum = leftColNum - 1, rightRowNum = rightColNum - 1 + isSquare, totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = leftColNum + rightColNum;
+        LocalTensor<float> inputTensor, outputTensor;
         if (k == 1)
         {
             // quick solve 1x1 svd
@@ -997,14 +1328,56 @@ private:
 
             goto FormIdxq;
         }
-    // first solve the singular values,roots of secular equation
+        // first solve the singular values,roots of secular equation
+        if (k == 2)
+        {
+            float a11 = z(0), a12 = z(1), a22 = dsigma(1);
+            // rank2,a11!=0,a12!=0,a22!=0
+            float m11 = a11 * a11 + a12 * a12, m12 = a12 * a22, m22 = a22 * a22;
+            float negb = m11 + m22;                         // negb >0
+            float diff = m11 > m22 ? m11 - m22 : m22 - m11; // use bigger float to minus smaller float to get high precision
+            float delta = diff * diff + 4 * m12 * m12;      // delta >0
+            float sigma1 = sqrt((negb + sqrt(delta)) / 2.0f);
+            float sigma2 = sqrt(2.0f * (a11 * a11 * a22 * a22) / (negb + sqrt(delta)));
+            if (sigma1 > sigma2)
+            {
+                swap(sigma1, sigma2);
+            }
+            // ascending order
+            d(0) = sigma1;
+            d(1) = sigma2;
+            float v1 = sigma1 * sigma1 - a12 * a12 - m22, v2 = a11 * a12, u1 = sigma1 * sigma1 - m22, u2 = m12;
+            float normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
+            rightSingularMatrix(0) = v1 / normv;
+            rightSingularMatrix(1) = v2 / normv;
+            leftSingularMatrix(0) = u1 / normu;
+            leftSingularMatrix(1) = u2 / normu;
+            v1 = sigma2 * sigma2 - a12 * a12 - m22, u1 = sigma2 * sigma2 - m22;
+            normv = sqrt(v1 * v1 + v2 * v2), normu = sqrt(u1 * u1 + u2 * u2);
+            rightSingularMatrix(LDN) = v1 / normv;
+            rightSingularMatrix(LDN + 1) = v2 / normv;
+            leftSingularMatrix(LDN) = u1 / normu;
+            leftSingularMatrix(LDN + 1) = u2 / normu;
+            RefreshAllCache();
+            goto MatrixMul;
+        }
 
-    // use lowner to compute z'
-    // compute the left and right singular vectors
+        // k>=3,solve the secular equation
+        // store dk^dk-sigmai^sigmai in tmpSpace(i,k)
+        for (uint16_t i = 0; i < k; ++i)
+        {
+            SecularEquationSolver(k, i, dsigma, z, tmpSpace[i * LDN], d[i]);
+        }
+        RefreshAllCache(); // get d from cache
+        // use lowner to compute z'
+        // compute the left and right singular vectors
+
+    MatrixMul:
     // multiply with prior orthonormal matrix to get the final left and right singular vectors
+    // prior matrix stored in st and gt,new matrix stored in leftSingularMatrix and rightSingularMatrix,use tmpSpace as dst,then copy back
     // update the l and f as well
-    // sort new d to form idxq
     FormIdxq:
+        // sort new d to form idxq
         return;
     }
 
