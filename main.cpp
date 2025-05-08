@@ -122,6 +122,7 @@ int main(int argc, char **argv)
     CHECK_ACL(aclrtMalloc((void **)&idxDevice, idxFileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     CHECK_ACL(aclrtMemset(idxDevice, idxFileSize, 0, idxFileSize));
 
+    std::cout << "before bidiagonalization" << std::endl;
     ACLRT_LAUNCH_KERNEL(upper_bidiagonalization)
     (bidiagonalizationBlockNum, stream, M, N, AMatrixDevice, UMatrixDevice, VtMatrixDevice, DArrayDevice, EArrayDevice, TauqArrayDevice, TaupArrayDevice, workspaceDevice);
     CHECK_ACL(aclrtSynchronizeStream(stream));
