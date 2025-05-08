@@ -239,6 +239,7 @@ private:
         GlobalTensor<float> rightSingularMatrix = wtGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
         GlobalTensor<float> st = stGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
         GlobalTensor<float> gt = gtGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
+        auto tmpSpace = tmpGm[leftSubMatrix.start_col * LDN + leftSubMatrix.start_col];
         GlobalTensor<float> f = fGm[leftSubMatrix.start_col];
         GlobalTensor<float> l = lGm[leftSubMatrix.start_col];
         GlobalTensor<uint32_t> idxq = idxqGm[leftSubMatrix.start_col];
@@ -258,6 +259,7 @@ private:
                 orgnrm = fabs(d(i));
             }
         }
+        // TODO orgnrm 为0时，特殊处理
         alpha /= orgnrm;
         beta /= orgnrm;
         { // scale d by orgnrm
@@ -292,7 +294,6 @@ private:
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
-        auto tmpSpace = tmpGm[leftSubMatrix.start_col];
         printf("[MergeSubMatrix] MergeSubMatrix_step2前\n");
         MergeSubMatrix_step2(k, leftColNum, rightColNum, isSquare, leftSingularMatrix, rightSingularMatrix, d, st, gt, f, l, idxq, idxc, coltyp, dsigma, z, tmpSpace);
         printf("[MergeSubMatrix] MergeSubMatrix_step2完成\n");
@@ -315,6 +316,7 @@ private:
             DataCopyPad(d, outputTensor, copyOutParams);
             outQueue.FreeTensor(outputTensor);
         }
+        printf("[MergeSubMatrix] 完成\n");
 
         return;
     }
@@ -1112,30 +1114,30 @@ private:
 
                 // calc coeffs of quadratic equation
                 float a = c3, negb = c1 + c2 + c3 * di2 + c3 * dip12, c = c1 * dip12 + c2 * di2 + c3 * di2 * dip12;
-                float lambda1, lambda2;
+                float sigma1, sigma2;
                 if (negb >= 0)
                 {
-                    lambda1 = (negb + sqrt(negb * negb - 4 * a * c)) / (2 * a);
-                    lambda2 = 2 * c / (negb + sqrt(negb * negb - 4 * a * c));
+                    sigma1 = sqrt((negb + sqrt(negb * negb - 4 * a * c)) / (2 * a));
+                    sigma2 = sqrt(2 * c / (negb + sqrt(negb * negb - 4 * a * c)));
                 }
                 else
                 {
-                    lambda1 = 2 * c / (negb - sqrt(negb * negb - 4 * a * c));
-                    lambda2 = (negb - sqrt(negb * negb - 4 * a * c)) / (2 * a);
+                    sigma1 = sqrt(2 * c / (negb - sqrt(negb * negb - 4 * a * c)));
+                    sigma2 = sqrt((negb - sqrt(negb * negb - 4 * a * c)) / (2 * a));
                 }
                 // get the new miu
-                if (lambda1 > di && lambda1 < dip1)
+                if (sigma1 > di && sigma1 < dip1)
                 {
-                    miu = sqrt(lambda1) - dChosen;
+                    miu = sigma1 - dChosen;
                 }
-                else if (lambda2 > di && lambda2 < dip1)
+                else if (sigma2 > di && sigma2 < dip1)
                 {
-                    miu = sqrt(lambda2) - dChosen;
+                    miu = sigma2 - dChosen;
                 }
                 else
                 {
-                    printf("panic:in SecularEquationSolver,lambda1:%f,lambda2:%f,di:%f,dip1:%f\n", lambda1, lambda2, di, dip1);
-                    miu = sqrt(lambda1) - dChosen;
+                    printf("panic:in SecularEquationSolver,sigma1:%f,sigma2:%f,di:%f,dip1:%f\n", sigma1, sigma2, di, dip1);
+                    miu = sigma1 - dChosen;
                 }
 
                 // calculate new psi1,psi2,result
@@ -1175,6 +1177,8 @@ private:
                 Mul(outputTensor, leftOtherTmp, inputTensor, leftNums); // d^2-omega^2
                 inQueue.FreeTensor(inputTensor);
                 outQueue.EnQue(outputTensor);
+
+                outputTensor = outQueue.DeQue<float>();
                 DataCopyPad(tmpSpace, outputTensor, copyOutParams1);
                 outQueue.FreeTensor(outputTensor);
             }
@@ -1186,6 +1190,7 @@ private:
                 Mul(outputTensor, rightOtherTmp, inputTensor, rightNums); // d^2-omega^2
                 inQueue.FreeTensor(inputTensor);
                 outQueue.EnQue(outputTensor);
+                outputTensor = outQueue.DeQue<float>();
                 DataCopyPad(tmpSpace[leftNums], outputTensor, copyOutParams2);
                 outQueue.FreeTensor(outputTensor);
             }
@@ -1288,6 +1293,7 @@ private:
                 Mul(outputTensor, otherTmp, inputTensor, n); // d^2-omega^2
                 inQueue.FreeTensor(inputTensor);
                 outQueue.EnQue(outputTensor);
+                outputTensor = outQueue.DeQue<float>();
                 DataCopyPad(tmpSpace, outputTensor, copyOutParams);
                 outQueue.FreeTensor(outputTensor);
             }
@@ -1401,7 +1407,7 @@ private:
             const DataCopyExtParams copyInParams = {1, k * sizeOfFloat, 0, 0, 0};
             const DataCopyExtParams copyOutParams = {1, k * sizeOfFloat, 0, 0, 0};
             const DataCopyPadExtParams<float> copyExtParams = {true, 0, 0, 0.0f};
-            auto tmp = tmpBuf1.AllocTensor<float>();
+            auto tmp = tmpBuf1.Get<float>();
             for (int i = 0; i < k; ++i)
             {
                 // load d^2 -sigma i ^2
@@ -1818,10 +1824,10 @@ private:
         // all rows of Vt are updated
         RefreshAllCache();
         printf("before updateUVt\n");
-        singleDumpTensor(uGm, 1024);
-        singleDumpTensor(vtGm, 1024);
-        singleDumpTensor(qtGm, 1024);
-        singleDumpTensor(wtGm, 1024);
+        // singleDumpTensor(uGm, 1024);
+        // singleDumpTensor(vtGm, 1024);
+        // singleDumpTensor(qtGm, 1024);
+        // singleDumpTensor(wtGm, 1024);
 
         mm->SetOrgShape(LDM, LDN, LDM, LDN);
         // printf("after setOrgShape\n");
@@ -1839,10 +1845,10 @@ private:
         // printf("after end\n");
         // Copy tmpGm to uGm
         printf("before cache refresh\n");
-        singleDumpTensor(tmpGm, 1024);
-        singleDumpTensor(uGm, 1024);
-        singleDumpTensor(wtGm, 1024);
-        singleDumpTensor(vtGm, 1024);
+        // singleDumpTensor(tmpGm, 1024);
+        // singleDumpTensor(uGm, 1024);
+        // singleDumpTensor(wtGm, 1024);
+        // singleDumpTensor(vtGm, 1024);
 
         // AscendC::DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(tmpGm);
         // printf("before copyMatrix\n");
