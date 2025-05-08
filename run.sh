@@ -33,6 +33,12 @@ if [ "$1" = "Re" ]; then
     cd ~/paco-svd/scripts;python3 verify_result.py ../output ../output
     exit 0
 fi
+if [ "$1" = "t" ]; then
+ 
+    # cd scripts;
+    cd ~/paco-svd/scripts;python3 verify_svd.py ../output
+    exit 0
+fi
 
 # source ~/Ascend/ascend-toolkit/latest/bin/setenv.bash
 # echo $ASCEND_HOME_PATH
