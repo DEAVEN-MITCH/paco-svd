@@ -157,7 +157,7 @@ public:
 
             return;
         }
-        printf("not terminate early,LDN:%d,g_coreType==AIV:%d\n,blockIdx:%d\n", LDN, g_coreType == AIV, blockIdx);
+        // printf("not terminate early,LDN:%d,g_coreType==AIV:%d\n,blockIdx:%d\n", LDN, g_coreType == AIV, blockIdx);
         uint16_t stackSize = svdTiling->stackSize;
         // init leaf node
         for (auto i = 0; i < stackSize; i++)
@@ -288,15 +288,15 @@ private:
         // deflate z and d
         // rotate to remove the N+1th column if necessary
         // permute qt and wt
-        printf("[MergeSubMatrix] 调用Deflation前\n");
+        // printf("[MergeSubMatrix] 调用Deflation前\n");
         Deflation(leftColNum - 1, rightColNum - 1 + isSquare, isSquare, beta, alpha, k, d, z, leftSingularMatrix, rightSingularMatrix, st, gt, f, l, idxq, idxc, idxp, idx, coltyp, dsigma);
-        printf("[MergeSubMatrix] Deflation完成, k=%d\n", k);
+        // printf("[MergeSubMatrix] Deflation完成, k=%d\n", k);
         // call secular quation solver to get sigma and singular vectors
         // update singular vectors with matmul
         // sort sigma and form idxq
-        printf("[MergeSubMatrix] MergeSubMatrix_step2前\n");
+        // printf("[MergeSubMatrix] MergeSubMatrix_step2前\n");
         MergeSubMatrix_step2(k, leftColNum, rightColNum, isSquare, leftSingularMatrix, rightSingularMatrix, d, st, gt, f, l, idxq, idxc, coltyp, dsigma, z, tmpSpace);
-        printf("[MergeSubMatrix] MergeSubMatrix_step2完成\n");
+        // printf("[MergeSubMatrix] MergeSubMatrix_step2完成\n");
         { // unscale d
             RefreshAllCache();
             const DataCopyExtParams copyInParams = {1, totalRowNum * sizeOfFloat, 0, 0, 0};
@@ -316,21 +316,21 @@ private:
             DataCopyPad(d, outputTensor, copyOutParams);
             outQueue.FreeTensor(outputTensor);
         }
-        printf("[MergeSubMatrix] 完成\n");
-        singleDumpTensor(d, 32);
+        // printf("[MergeSubMatrix] 完成\n");
+        // singleDumpTensor(d, 32);
 
         return;
     }
 
     __aicore__ inline void Deflation(uint16_t leftRowNum, uint16_t rightRowNum, bool isSquare, float beta, float alpha, uint16_t &k, GlobalTensor<float> &d, GlobalTensor<float> &z, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &idxp, GlobalTensor<uint32_t> &idx, GlobalTensor<uint32_t> &coltyp, GlobalTensor<float> &dsigma)
     {
-        printf("[Deflation] leftRowNum=%d, rightRowNum=%d, isSquare=%d, beta=%f, alpha=%f\n", leftRowNum, rightRowNum, isSquare, beta, alpha);
+        // printf("[Deflation] leftRowNum=%d, rightRowNum=%d, isSquare=%d, beta=%f, alpha=%f\n", leftRowNum, rightRowNum, isSquare, beta, alpha);
         const uint16_t totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = totalRowNum + 1 - isSquare, dNum = totalRowNum - 1;
         const uint16_t leftRowNump1 = leftRowNum + 1;
         const uint16_t leftRowNump2 = leftRowNum + 2;
         const uint16_t leftColNum = leftRowNum + 1;
         const uint16_t rightColNum = rightRowNum + 1 - isSquare;
-        printf("[Deflation] dNum=%d, totalRowNum=%d, totalColNum=%d\n", dNum, totalRowNum, totalColNum);
+        // printf("[Deflation] dNum=%d, totalRowNum=%d, totalColNum=%d\n", dNum, totalRowNum, totalColNum);
         // form d and z
         RefreshAllCache();
         LocalTensor<float> inputTensor, outputTensor, bindLocalf;
@@ -540,7 +540,7 @@ private:
                 MrgSortSrcList<float> mrgSortSrcList;
                 mrgSortSrcList.src1 = workTensor;
                 mrgSortSrcList.src2 = workTensor[leftRowNum * 2];
-                printf("[Deflation] mrgSortSrcList.src1=%p,mrgSortSrcList.src2=%p\n", mrgSortSrcList.src1.GetPhyAddr(), mrgSortSrcList.src2.GetPhyAddr());
+                // printf("[Deflation] mrgSortSrcList.src1=%p,mrgSortSrcList.src2=%p\n", mrgSortSrcList.src1.GetPhyAddr(), mrgSortSrcList.src2.GetPhyAddr());
                 MrgSort4Info params;
                 params.elementLengths[0] = leftRowNum;
                 params.elementLengths[1] = rightRowNum;
@@ -639,7 +639,7 @@ private:
         k = 0;
         uint16_t k2 = totalRowNum, jprev, j, idxjp, idxj;
         float c, s, tau;
-        printf("[Deflation] before find the first undeflated z\n");
+        // printf("[Deflation] before find the first undeflated z\n");
         // find the first undeflated z
         for (j = 1; j < totalRowNum; ++j)
         {
@@ -976,7 +976,7 @@ private:
 
     __aicore__ inline void SecularEquationSolver(const uint16_t n, const uint16_t i, const GlobalTensor<float> &dsigma, const GlobalTensor<float> &z, const GlobalTensor<float> &tmpSpace, const GlobalTensor<float> &d)
     {
-        printf("[SecularEquationSolver] n=%d, i=%d\n", n, i);
+        // printf("[SecularEquationSolver] n=%d, i=%d\n", n, i);
         LocalTensor<float> inputTensor, outputTensor;
         float miu, omega, di, dip1, dChosen, di2, dip12;
         // actual d stored in dsigma,tmp1 stores delta dj-di or dj-dip1,tmp2 stores dj+di or dj+dip1
@@ -1092,7 +1092,7 @@ private:
                 iter++;
                 if (iter > MaxIter - 5)
                 {
-                    printf("[SecularEquationSolver]iter=%d,result=%f,tol=%f,miu=%f\n", iter, result, tol, miu);
+                    // printf("[SecularEquationSolver]iter=%d,result=%f,tol=%f,miu=%f\n", iter, result, tol, miu);
                 }
                 // calc psi1derivative psi2derivative,c1c2c3
                 {
@@ -1151,7 +1151,7 @@ private:
                 }
                 else
                 {
-                    printf("panic:in SecularEquationSolver,sigma1:%f,sigma2:%f,di:%f,dip1:%f\n", sigma1, sigma2, di, dip1);
+                    // printf("panic:in SecularEquationSolver,sigma1:%f,sigma2:%f,di:%f,dip1:%f\n", sigma1, sigma2, di, dip1);
                     miu = sigma1 - dChosen;
                 }
 
@@ -1183,11 +1183,11 @@ private:
             }
             if (iter == MaxIter)
             {
-                printf("panic:in SecularEquationSolver,iter==MaxIter,miu=%f,dChosen=%f,di=%f,dip1=%f,tol=%f,result=%f\n", miu, dChosen, di, dip1, tol, result);
+                // printf("panic:in SecularEquationSolver,iter==MaxIter,miu=%f,dChosen=%f,di=%f,dip1=%f,tol=%f,result=%f\n", miu, dChosen, di, dip1, tol, result);
             }
             else
             {
-                printf("[SecularEquationSolver]ending iter=%d\n", iter);
+                // printf("[SecularEquationSolver]ending iter=%d\n", iter);
             }
             // update d and tmpSpace
             d(i) = dChosen + miu;
@@ -1310,11 +1310,11 @@ private:
             }
             if (iter == MaxIter)
             {
-                printf("panic:in SecularEquationSolver,iter==MaxIter,miu=%f,di=%f,dip1=%f,tol=%f,result=%f\n", miu, di, dip1, tol, result);
+                // printf("panic:in SecularEquationSolver,iter==MaxIter,miu=%f,di=%f,dip1=%f,tol=%f,result=%f\n", miu, di, dip1, tol, result);
             }
             else
             {
-                printf("[SecularEquationSolver]ending iter=%d\n", iter);
+                // printf("[SecularEquationSolver]ending iter=%d\n", iter);
             }
             // update d and tmpSpace
             d(i) = di + miu;
@@ -1336,12 +1336,12 @@ private:
     }
     __aicore__ inline void MergeSubMatrix_step2(const uint16_t k, const uint16_t leftColNum, const uint16_t rightColNum, const bool isSquare, GlobalTensor<float> &leftSingularMatrix, GlobalTensor<float> &rightSingularMatrix, GlobalTensor<float> &d, GlobalTensor<float> &st, GlobalTensor<float> &gt, GlobalTensor<float> &f, GlobalTensor<float> &l, GlobalTensor<uint32_t> &idxq, GlobalTensor<uint32_t> &idxc, GlobalTensor<uint32_t> &ctot, GlobalTensor<float> &dsigma, GlobalTensor<float> &z, GlobalTensor<float> &tmpSpace)
     {
-        printf("[MergeSubMatrix_step2] k=%d, leftColNum=%d, rightColNum=%d, isSquare=%d\n", k, leftColNum, rightColNum, isSquare);
+        // printf("[MergeSubMatrix_step2] k=%d, leftColNum=%d, rightColNum=%d, isSquare=%d\n", k, leftColNum, rightColNum, isSquare);
         const auto leftRowNum = leftColNum - 1, rightRowNum = rightColNum - 1 + isSquare, totalRowNum = leftRowNum + rightRowNum + 1, totalColNum = leftColNum + rightColNum;
         LocalTensor<float> inputTensor, outputTensor;
         if (k == 1)
         {
-            printf("[MergeSubMatrix_step2] 1x1 svd\n");
+            // printf("[MergeSubMatrix_step2] 1x1 svd\n");
             // quick solve 1x1 svd
             d(0) = fabs(z(0));
             // copy st and gt to leftSingularMatrix and rightSingularMatrix
@@ -1379,7 +1379,7 @@ private:
         // first solve the singular values,roots of secular equation
         if (k == 2)
         {
-            printf("[MergeSubMatrix_step2] 2x2 svd\n");
+            // printf("[MergeSubMatrix_step2] 2x2 svd\n");
             float a11 = z(0), a12 = z(1), a22 = dsigma(1);
             // rank2,a11!=0,a12!=0,a22!=0
             float m11 = a11 * a11 + a12 * a12, m12 = a12 * a22, m22 = a22 * a22;
@@ -1413,14 +1413,14 @@ private:
 
         // k>=3,solve the secular equation
         // store dk^dk-sigmai^sigmai in tmpSpace(i,k)
-        printf("[MergeSubMatrix_step2] k>=3,solve the secular equation\n");
+        // printf("[MergeSubMatrix_step2] k>=3,solve the secular equation\n");
         for (uint16_t i = 0; i < k; ++i)
         {
             SecularEquationSolver(k, i, dsigma, z, tmpSpace[i * LDN], d);
         }
         RefreshAllCache(); // get d from cache
-        singleDumpTensor(d, 32);
-        singleDumpTensor(dsigma, 32);
+        // singleDumpTensor(d, 32);
+        // singleDumpTensor(dsigma, 32);
         // use lowner to compute z'
         float zi;
         for (uint16_t i = 0; i < k; ++i)
@@ -1500,7 +1500,7 @@ private:
         // prior matrix stored in st and gt,new matrix stored in leftSingularMatrix and rightSingularMatrix,use tmpSpace as dst,then copy back
         // update the l and f as well
         // left Matrix = st*leftMatrix ,st stored in leftSingularMatrix and leftMatrix stored in st.It's somewhat perplexing,though
-        printf("[MergeSubMatrix_step2] multiply with prior orthonormal matrix to get the final left and right singular vectors\n");
+        // printf("[MergeSubMatrix_step2] multiply with prior orthonormal matrix to get the final left and right singular vectors\n");
         mm->SetOrgShape(LDN, LDN, LDN, LDN, LDN);
         mm->SetSingleShape(k, totalRowNum, k);
         mm->SetTensorA(leftSingularMatrix);
@@ -1558,7 +1558,7 @@ private:
                 // singleDumpTensor(workTensor, 64);
                 MrgSort(dstTensor, mrgSortSrcList, params);
             }
-            printf("[MergeSubMatrix_step2] get the idxq\n");
+            // printf("[MergeSubMatrix_step2] get the idxq\n");
             // get the idxq
             {
                 const DataCopyExtParams copyOutParamsi = {1, totalRowNum * sizeOfUint32_t, 0, 0, 0};
@@ -1589,7 +1589,7 @@ private:
             outQueue.FreeTensor(outIndexTensor);
         }
 
-        printf("[MergeSubMatrix_step2] 结束\n");
+        // printf("[MergeSubMatrix_step2] 结束\n");
         return;
     }
 
@@ -1598,7 +1598,7 @@ private:
         const auto idx_start = subMatrix.start_col;
         const auto colNum = subMatrix.end_col - idx_start;
         const auto rowNum = subMatrix.end_col == LDN ? colNum : colNum - 1;
-        printf("compute_base_case_svd,start_col:%d,colNum:%d,rowNum:%d\n", idx_start, colNum, rowNum);
+        // printf("compute_base_case_svd,start_col:%d,colNum:%d,rowNum:%d\n", idx_start, colNum, rowNum);
         GlobalTensor<float> qt = qtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> wt = wtGm[idx_start * LDN + idx_start];
         GlobalTensor<float> d = dGm[idx_start];
@@ -1916,7 +1916,7 @@ private:
         // all rows of Vt are updated
         RefreshAllCache();
         printf("before updateUVt\n");
-        singleDumpTensor(dGm, 32);
+        // singleDumpTensor(dGm, 32);
         // singleDumpTensor(uGm, 1024);
         // singleDumpTensor(vtGm, 1024);
         // singleDumpTensor(qtGm, 1024);
@@ -1937,7 +1937,7 @@ private:
         // mm->End();
         // printf("after end\n");
         // Copy tmpGm to uGm
-        printf("before cache refresh\n");
+        // printf("before cache refresh\n");
         // singleDumpTensor(tmpGm, 1024);
         // singleDumpTensor(uGm, 1024);
         // singleDumpTensor(wtGm, 1024);
