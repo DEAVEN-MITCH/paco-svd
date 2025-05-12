@@ -9,6 +9,7 @@ program bidiag_gen
   character(len=100) :: line
   integer :: lwork, query_lwork, ierr
   logical :: alloc_ok
+  real(sp) :: start_time, end_time
 
   ! 读取矩阵维度
   open(unit=10, file="../args.txt", status='old', iostat=ierr)
@@ -114,8 +115,10 @@ program bidiag_gen
      stop
   endif
 
-  ! 执行双对角化
-  print *, "Computing bidiagonal form..."
+  ! 执行双对角化 + U/Vt生成计时
+  print *, "Computing bidiagonal form and orthogonal matrices..."
+  call cpu_time(start_time)
+
   call sgebrd(M, N, A, lda, D, E, tauq, taup, work, lwork, info)
   if (info /= 0) then
      print *, "sgebrd failed with info = ", info
@@ -151,6 +154,9 @@ program bidiag_gen
      stop
   endif
   print *, "Vt generated successfully"
+
+  call cpu_time(end_time)
+  print *, "Time for bidiagonal + orthogonal matrices: ", end_time - start_time, " seconds"
 
   ! 保存结果
   print *, "Saving results..."

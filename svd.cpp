@@ -731,6 +731,16 @@ private:
         // st(k) = z(jprev);
         // dsigma(k) = d(jprev);
         idxp(k) = jprev;
+        //k is still idx now,k+1 is the number of nondeflated cols
+        // make last totalRowNum-k-1 d in ascending order,
+        for (j = k + 1; 2 * j - k < totalRowNum; ++j)
+        {
+            auto idxp1 = idxp(j);
+            auto idxp2 = idxp(totalRowNum - (j - k));
+            idxp(j) = idxp2;
+            idxp(totalRowNum - (j - k)) = idxp1;
+        }
+
     label120:
         // not using ctot and psm,to simplify the code and take advantage of AIC
         RefreshAllCache();
@@ -1082,7 +1092,7 @@ private:
                 iter++;
                 if (iter > MaxIter - 5)
                 {
-                    printf("[SecularEquationSolver]iter=%d,result=%f,tol=%f,miu=%f\n", iter, result, tol,miu);
+                    printf("[SecularEquationSolver]iter=%d,result=%f,tol=%f,miu=%f\n", iter, result, tol, miu);
                 }
                 // calc psi1derivative psi2derivative,c1c2c3
                 {
@@ -1240,7 +1250,7 @@ private:
                 Mul(z2, inputTensor, inputTensor, n);
                 ReduceSum(otherTmp, z2, inputTensor, n);
                 inQueue.FreeTensor(inputTensor);
-                znorm = otherTmp(0);
+                znorm = sqrt(otherTmp(0));
             }
             dip1 = dsigma(i) + znorm;
             dip12 = dip1 * dip1;
@@ -1258,6 +1268,7 @@ private:
             }
             result = 1.0f + psi; // psi<0
             tol = 8.0f * (fabs(psi) + 1.0f) * n * EPS;
+            // printf("dn=%f,znorm=%f,result=%f,tol=%f,miu=%f\n", di, znorm, result, tol, miu);
             // calc c1,c1hat
             uint16_t iter = 0;
             while (fabs(result) > tol && iter < MaxIter)
@@ -1295,6 +1306,7 @@ private:
                 }
                 result = 1.0f + psi;
                 tol = 8.0f * (fabs(psi) + 1.0f) * n * EPS;
+                // printf("dn=%f,znorm=%f,result=%f,tol=%f,miu=%f\n", di, znorm, result, tol, miu);
             }
             if (iter == MaxIter)
             {
@@ -1489,15 +1501,15 @@ private:
         // update the l and f as well
         // left Matrix = st*leftMatrix ,st stored in leftSingularMatrix and leftMatrix stored in st.It's somewhat perplexing,though
         printf("[MergeSubMatrix_step2] multiply with prior orthonormal matrix to get the final left and right singular vectors\n");
-        mm->SetOrgShape(LDN, LDN, LDN, LDN);
-        mm->SetSingleShape(k, k, totalRowNum);
+        mm->SetOrgShape(LDN, LDN, LDN, LDN, LDN);
+        mm->SetSingleShape(k, totalRowNum, k);
         mm->SetTensorA(leftSingularMatrix);
         mm->SetTensorB(st);
         mm->IterateAll(tmpSpace);
         CopyMatrix(tmpSpace, leftSingularMatrix, LDN, LDN, k, totalRowNum);
 
-        mm->SetOrgShape(LDN, LDN, LDN, LDN);
-        mm->SetSingleShape(k, k, totalColNum);
+        mm->SetOrgShape(LDN, LDN, LDN, LDN, LDN);
+        mm->SetSingleShape(k, totalColNum, k);
         mm->SetTensorA(rightSingularMatrix);
         mm->SetTensorB(gt);
         mm->IterateAll(tmpSpace);
@@ -1505,7 +1517,7 @@ private:
         for (int i = 0; i < k; ++i)
         {
             f(i) = rightSingularMatrix(i * LDN);
-            l(i) = rightSingularMatrix(i * LDN + k - 1);
+            l(i) = rightSingularMatrix(i * LDN + totalColNum - 1);
         }
 
     FormIdxq:
@@ -1853,6 +1865,47 @@ private:
 
     __aicore__ inline void rearrange_qwtAccordingToIdxq()
     {
+        // 用idxqGm中的索引将dGm重新排序
+        {
+            const DataCopyExtParams copyInParamsf = {1, LDN * sizeOfFloat, 0, 0, 0};
+            const DataCopyExtParams copyInParamsi = {1, LDN * sizeOfUint32_t, 0, 0, 0};
+            const DataCopyPadExtParams<float> copyInPadParamsf = {true, 0, 0, 0.0f};
+            const DataCopyPadExtParams<uint32_t> copyInPadParamsi = {true, 0, 0, 0};
+            const DataCopyExtParams copyOutParamsf = {1, LDN * sizeOfFloat, 0, 0, 0};
+
+            auto dTensor = inQueue.AllocTensor<float>();
+            DataCopyPad(dTensor, dGm, copyInParamsf, copyInPadParamsf);
+            inQueue.EnQue(dTensor);
+
+            auto idxqTensor = inQueue.AllocTensor<uint32_t>();
+            DataCopyPad(idxqTensor, idxqGm, copyInParamsi, copyInPadParamsi);
+            inQueue.EnQue(idxqTensor);
+
+            dTensor = inQueue.DeQue<float>();
+            idxqTensor = inQueue.DeQue<uint32_t>();
+            auto outputTensor = outQueue.AllocTensor<float>();
+            // using ascending idx to get descending idx
+            Muls<int32_t>(idxqTensor.ReinterpretCast<int32_t>(), idxqTensor.ReinterpretCast<int32_t>(), -1, LDN);
+            Adds<int32_t>(idxqTensor.ReinterpretCast<int32_t>(), idxqTensor.ReinterpretCast<int32_t>(), LDN - 1, LDN);
+            Muls<int32_t>(idxqTensor.ReinterpretCast<int32_t>(), idxqTensor.ReinterpretCast<int32_t>(), sizeOfFloat, LDN);
+            Gather(outputTensor, dTensor, idxqTensor, 0, LDN);
+            outQueue.EnQue(outputTensor);
+            inQueue.FreeTensor(dTensor);
+            inQueue.FreeTensor(idxqTensor);
+
+            outputTensor = outQueue.DeQue<float>();
+            DataCopyPad(dGm, outputTensor, copyOutParamsf);
+            outQueue.FreeTensor(outputTensor);
+        }
+        // 用idxqGm中的索引将wtGm、qtGm重新排序
+        for (int i = 0; i < LDN; i++)
+        {
+            int idx = idxqGm(i);
+            copyRow(LDN, wtGm[idx * LDN], stGm[(LDN - 1 - i) * LDN]);
+            copyRow(LDN, qtGm[idx * LDN], gtGm[(LDN - 1 - i) * LDN]);
+        }
+        CopyMatrix(stGm, wtGm, LDN, LDN, LDN, LDN);
+        CopyMatrix(gtGm, qtGm, LDN, LDN, LDN, LDN);
     }
 
     __aicore__ inline void updateUVt()
@@ -1869,7 +1922,7 @@ private:
         // singleDumpTensor(qtGm, 1024);
         // singleDumpTensor(wtGm, 1024);
 
-        mm->SetOrgShape(LDM, LDN, LDM, LDN);
+        mm->SetOrgShape(LDM, LDN, LDM, LDN, LDN);
         // printf("after setOrgShape\n");
         mm->SetSingleShape(LDM, LDN, LDN);
         // printf("after setSingleShape\n");
@@ -1906,7 +1959,7 @@ private:
         // singleDumpTensor(wtGm, 1024);
         // singleDumpTensor(vtGm, 1024);
 
-        mm->SetOrgShape(LDN, LDN, LDN, LDN);
+        mm->SetOrgShape(LDN, LDN, LDN, LDN, LDN);
         mm->SetSingleShape(LDN, LDN, LDN);
         mm->SetTensorA(wtGm);
         mm->SetTensorB(vtGm);
@@ -2062,50 +2115,4 @@ extern "C" __global__ __aicore__ void svd_DC(int M, int N, GM_ADDR a, GM_ADDR u,
     bdc.init(M, N, a, u, vt, d, e, qt, wt, idx, svdStack, workspace, &tiling, pipe, mm);
     bdc.Process();
 #endif
-    // for (int len = 1; len <= length; len *= 2)
-    // {
-    //     for (int l1 = st; l1 <= ed; l1 += 2 * len)
-    //     {
-    //         int r1 = l1 + len - 1;
-    //         int l2 = l1 + len;
-    //         int r2 = l1 + 2 * len - 1;
-    //         if (r1 >= ed)
-    //         {
-    //             continue;
-    //         }
-    //         if (r2 >= ed)
-    //         {
-    //             r2 = ed;
-    //         }
-    //         printf("INNER_MERGING: (%d,%d),(%d,%d)\n", l1, r1, l2, r2);
-    //         // merge(l1,r1,l2,r2);
-    //     }
-    // }
-    // for (int len = 1; len <= num; len *= 2)
-    // {
-    //     printf("outter len:%d\n", len);
-    //     if (idx % (2 * len))
-    //     {
-    //         // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
-    //         // CrossCoreWaitFlag(0x8);
-    //         continue;
-    //     }
-    //     int l1 = idx;
-    //     int r1 = idx + len - 1;
-    //     int l2 = idx + len;
-    //     int r2 = idx + 2 * len - 1;
-    //     if (r1 >= num - 1)
-    //     {
-    //         // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
-    //         // CrossCoreWaitFlag(0x8);
-    //         continue;
-    //     }
-    //     if (r2 >= num - 1)
-    //     {
-    //         r2 = num - 1;
-    //     }
-    //     printf("OUTTER_MERGING: (%d,%d),(%d,%d)\n", l1, r1, l2, r2);
-    //     // CrossCoreSetFlag<0x0, PIPE_S>(0x8);
-    //     // CrossCoreWaitFlag(0x8);
-    // }
 }
